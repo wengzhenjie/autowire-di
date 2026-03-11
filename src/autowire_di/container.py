@@ -6,17 +6,17 @@ from __future__ import annotations
 from contextlib import contextmanager, asynccontextmanager
 from typing import Any, Callable, Generator, AsyncGenerator, TypeVar
 
-from python_di.providers import (
+from autowire_di.providers import (
     ClassProvider,
     FactoryProvider,
     Provider,
     ValueProvider,
 )
-from python_di.recipe import BindingSpec, ContainerRecipe, _Op, _UNSET
-from python_di.registry import Registry
-from python_di.resolver import Resolver, _is_abstract
-from python_di.scope import ScopedCache, SingletonCache
-from python_di.types import (
+from autowire_di.recipe import BindingSpec, ContainerRecipe, _Op, _UNSET
+from autowire_di.registry import Registry
+from autowire_di.resolver import Resolver, _is_abstract
+from autowire_di.scope import ScopedCache, SingletonCache
+from autowire_di.types import (
     Binding,
     ResolutionError,
     Scope,
@@ -287,7 +287,7 @@ class Container(Resolver):
     # ------------------------------------------------------------------
 
     def validate(self) -> None:
-        from python_di.validator import validate_container
+        from autowire_di.validator import validate_container
         validate_container(self)
 
     # ------------------------------------------------------------------

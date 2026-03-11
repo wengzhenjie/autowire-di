@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from python_di import Container, Scope, ScopeNotActiveError
+from autowire_di import Container, Scope, ScopeNotActiveError
 
 
 # ---------------------------------------------------------------------------

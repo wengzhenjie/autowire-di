@@ -6,7 +6,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Generator
 
-from python_di.types import BindingKey
+from autowire_di.types import BindingKey
 
 
 class SingletonCache:

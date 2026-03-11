@@ -1,17 +1,17 @@
-"""python-di: A Pythonic dependency injection framework."""
+"""py-di: A Pythonic dependency injection framework."""
 
-from python_di.container import Container, ScopedContainer
-from python_di.markers import Inject, Named
-from python_di.module import Module
-from python_di.providers import (
+from autowire_di.container import Container, ScopedContainer
+from autowire_di.markers import Inject, Named
+from autowire_di.module import Module
+from autowire_di.providers import (
     AliasProvider,
     ClassProvider,
     FactoryProvider,
     Provider,
     ValueProvider,
 )
-from python_di.recipe import ContainerRecipe
-from python_di.types import (
+from autowire_di.recipe import ContainerRecipe
+from autowire_di.types import (
     Binding,
     CircularDependencyError,
     DIError,

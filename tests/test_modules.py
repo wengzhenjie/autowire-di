@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from python_di import Container, Module, Scope
+from autowire_di import Container, Module, Scope
 
 
 # ---------------------------------------------------------------------------

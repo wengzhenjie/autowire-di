@@ -3,7 +3,7 @@
 Example::
 
     from typing import Annotated
-    from python_di import Named, Inject
+    from autowire_di import Named, Inject
 
     class OrderService:
         def __init__(

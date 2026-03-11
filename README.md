@@ -1,4 +1,4 @@
-# python-di
+# autowire-di
 
 一个 Pythonic 的依赖注入框架，支持自动装配（auto-wiring）、作用域生命周期管理和异步解析。
 
@@ -7,7 +7,7 @@
 ## 安装
 
 ```bash
-uv add python-di
+uv add autowire-di
 ```
 
 ## 快速开始
@@ -15,7 +15,7 @@ uv add python-di
 ### 基本注册与解析
 
 ```python
-from python_di import Container, Scope
+from autowire_di import Container, Scope
 
 container = Container()
 
@@ -59,7 +59,7 @@ assert isinstance(service.repo, PostgresUserRepository)
 ### 三种作用域
 
 ```python
-from python_di import Container, Scope
+from autowire_di import Container, Scope
 
 container = Container()
 
@@ -104,7 +104,7 @@ container.register(ICache, instance=cache)
 
 ```python
 from typing import Annotated
-from python_di import Container, Named
+from autowire_di import Container, Named
 
 container = Container()
 container.register(ICache, RedisCache, name="primary")
@@ -130,7 +130,7 @@ class OrderService:
 
 ```python
 from typing import Annotated
-from python_di import Container, Inject
+from autowire_di import Container, Inject
 
 container = Container()
 container.set_config({
@@ -176,7 +176,7 @@ class EventBus:
 将相关绑定组织为可复用的模块：
 
 ```python
-from python_di import Container, Module, Scope
+from autowire_di import Container, Module, Scope
 
 class InfraModule(Module):
     def configure(self, container: Container) -> None:
@@ -351,7 +351,7 @@ service = rebuilt.resolve(TorchPredictor)
 ## 项目结构
 
 ```
-src/python_di/
+src/autowire_di/
 ├── __init__.py       # 公开 API 导出
 ├── container.py      # Container 和 ScopedContainer
 ├── resolver.py       # 自动装配解析器（类型注解检查）

@@ -1,8 +1,9 @@
 [project]
-name = "python-di"
+name = "autowire-di"
 version = "0.1.0"
 description = "A Pythonic dependency injection framework with auto-wiring, scoped lifecycles, and async support"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = []
 
@@ -11,7 +12,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/python_di"]
+packages = ["src/autowire_di"]
 
 [dependency-groups]
 dev = [

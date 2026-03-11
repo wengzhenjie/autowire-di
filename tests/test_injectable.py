@@ -10,7 +10,7 @@ from typing import Annotated, Protocol, runtime_checkable
 import cloudpickle
 import pytest
 
-from python_di import Container, ContainerRecipe, Inject, Module, Named, Scope
+from autowire_di import Container, ContainerRecipe, Inject, Module, Named, Scope
 
 
 # ---------------------------------------------------------------------------

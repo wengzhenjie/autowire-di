@@ -6,7 +6,7 @@ from typing import Protocol, runtime_checkable
 
 import pytest
 
-from python_di import Container, ResolutionError, RegistrationError, Scope, ScopeNotActiveError
+from autowire_di import Container, ResolutionError, RegistrationError, Scope, ScopeNotActiveError
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +409,7 @@ class TestModuleInstallation:
     """install(module) installs a Module."""
 
     def test_install_module_configures_container(self) -> None:
-        from python_di import Module
+        from autowire_di import Module
 
         class TestModule(Module):
             def configure(self, container: Container) -> None:

@@ -6,8 +6,8 @@ from __future__ import annotations
 import inspect
 from typing import Any, Callable, get_args, get_origin, get_type_hints
 
-from python_di.markers import Inject, Named
-from python_di.types import CircularDependencyError, ResolutionError
+from autowire_di.markers import Inject, Named
+from autowire_di.types import CircularDependencyError, ResolutionError
 
 
 def _is_abstract(cls: type) -> bool:

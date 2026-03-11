@@ -6,7 +6,7 @@ from typing import Protocol
 
 import pytest
 
-from python_di import (
+from autowire_di import (
     CircularDependencyError,
     Container,
     ResolutionError,

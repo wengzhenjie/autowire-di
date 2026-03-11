@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from python_di.container import Container
+    from autowire_di.container import Container
 
 
 class Module(ABC):

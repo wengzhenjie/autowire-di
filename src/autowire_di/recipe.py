@@ -8,10 +8,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, TYPE_CHECKING
 
-from python_di.types import Scope
+from autowire_di.types import Scope
 
 if TYPE_CHECKING:
-    from python_di.container import Container
+    from autowire_di.container import Container
 
 
 class _UnsetType:
@@ -111,7 +111,7 @@ class ContainerRecipe:
 
     def build(self) -> Container:
         """Reconstruct a fully-configured Container from this recipe."""
-        from python_di.container import Container
+        from autowire_di.container import Container
 
         c = Container(config=self.config)
         for module in self.modules:

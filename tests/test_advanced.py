@@ -7,7 +7,7 @@ from typing import Annotated, Protocol, runtime_checkable
 
 import pytest
 
-from python_di import (
+from autowire_di import (
     Container,
     Module,
     Named,

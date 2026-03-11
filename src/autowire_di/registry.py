@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from python_di.types import Binding, BindingKey, RegistrationError, make_key
+from autowire_di.types import Binding, BindingKey, RegistrationError, make_key
 
 
 class Registry:

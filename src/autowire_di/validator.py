@@ -7,10 +7,10 @@ from __future__ import annotations
 import inspect
 from typing import get_origin, get_type_hints
 
-from python_di.markers import Inject, Named
-from python_di.providers import AliasProvider, ClassProvider, FactoryProvider
-from python_di.resolver import _is_abstract, _unwrap_annotated, _find_marker
-from python_di.types import (
+from autowire_di.markers import Inject, Named
+from autowire_di.providers import AliasProvider, ClassProvider, FactoryProvider
+from autowire_di.resolver import _is_abstract, _unwrap_annotated, _find_marker
+from autowire_di.types import (
     Binding,
     CircularDependencyError,
     DIError,
@@ -24,7 +24,7 @@ from python_di.types import (
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from python_di.container import Container
+    from autowire_di.container import Container
 
 
 def validate_container(container: Container) -> None:
