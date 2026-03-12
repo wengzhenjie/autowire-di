@@ -1,6 +1,6 @@
 [project]
 name = "autowire-di"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Pythonic dependency injection framework with auto-wiring, scoped lifecycles, and async support"
 readme = "README.md"
 license = "MIT"
