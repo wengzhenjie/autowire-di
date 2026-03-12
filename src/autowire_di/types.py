@@ -18,6 +18,7 @@ class Binding:
     scope: Scope = Scope.TRANSIENT
     name: str | None = None
     tags: dict[str, str] = field(default_factory=dict)
+    eager: bool = False
 
 
 BindingKey = tuple[type, str | None]

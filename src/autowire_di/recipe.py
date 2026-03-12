@@ -4,7 +4,7 @@ remote worker (Ray, Spark, etc.) without serializing live objects."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, TYPE_CHECKING
 
@@ -41,8 +41,10 @@ _UNSET = _UnsetType()
 class _Op(Enum):
     REGISTER = "register"
     REGISTER_MULTI = "register_multi"
+    REGISTER_MAP = "register_map"
     OVERRIDE = "override"
     SET_CONFIG = "set_config"
+    BIND_INTERCEPTOR = "bind_interceptor"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +60,8 @@ class BindingSpec:
     instance: Any = _UNSET
     scope: Scope = Scope.TRANSIENT
     name: str | None = None
+    eager: bool = False
+    interceptor_args: tuple[Any, ...] | None = None
 
     def apply(self, container: Container) -> None:
         """Replay this registration on *container*."""
@@ -75,11 +79,20 @@ class BindingSpec:
                 kw.pop("implementation", None),
                 scope=self.scope,
                 name=self.name,
+                eager=self.eager,
                 **kw,
             )
         elif self.op is _Op.REGISTER_MULTI:
             container.register_multi(
                 self.interface,  # type: ignore[arg-type]
+                kw.pop("implementation", None),
+                scope=self.scope,
+                **kw,
+            )
+        elif self.op is _Op.REGISTER_MAP:
+            container.register_map(
+                self.interface,  # type: ignore[arg-type]
+                self.name or "",
                 kw.pop("implementation", None),
                 scope=self.scope,
                 **kw,
@@ -93,7 +106,11 @@ class BindingSpec:
                 **kw,
             )
         elif self.op is _Op.SET_CONFIG:
-            container.set_config(self.instance)  # config dict stored in instance slot
+            container.set_config(self.instance)
+        elif self.op is _Op.BIND_INTERCEPTOR:
+            if self.interceptor_args is not None:
+                class_matcher, method_matcher, interceptor = self.interceptor_args
+                container.bind_interceptor(class_matcher, method_matcher, interceptor)
 
 
 @dataclass(slots=True)

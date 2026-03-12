@@ -6,7 +6,8 @@ from __future__ import annotations
 import inspect
 from typing import Any, Callable, get_args, get_origin, get_type_hints
 
-from autowire_di.markers import Inject, Named
+from autowire_di.markers import Assisted, Inject, Named
+from autowire_di.providers import ProviderWrapper
 from autowire_di.types import CircularDependencyError, ResolutionError
 
 
@@ -86,9 +87,19 @@ class Resolver:
                 kwargs[name] = self._resolve_config(inject_marker.config, config)
                 continue
 
+            # --- Assisted() marker — skip, caller provides this ---
+            if _find_marker(metadata, Assisted) is not None:
+                continue
+
             # --- Named(...) marker ---
             named_marker = _find_marker(metadata, Named)
             dep_name = named_marker.name if named_marker else None
+
+            # --- Provider[T] lazy injection ---
+            if _is_provider_type(base_type):
+                inner = get_args(base_type)[0]
+                kwargs[name] = ProviderWrapper(inner, self, name=dep_name)
+                continue
 
             # --- list[T] multi-binding ---
             origin = get_origin(base_type)
@@ -97,6 +108,16 @@ class Resolver:
                 if inner_args:
                     try:
                         kwargs[name] = self.resolve_multi(inner_args[0])
+                        continue
+                    except (ResolutionError, AttributeError):
+                        pass
+
+            # --- dict[str, T] map-binding ---
+            if origin is dict:
+                inner_args = get_args(base_type)
+                if len(inner_args) == 2 and inner_args[0] is str:
+                    try:
+                        kwargs[name] = self.resolve_map(inner_args[1])
                         continue
                     except (ResolutionError, AttributeError):
                         pass
@@ -143,6 +164,50 @@ class Resolver:
         )
 
     # ------------------------------------------------------------------
+    # Assisted injection — factory generation
+    # ------------------------------------------------------------------
+
+    def create_factory(self, cls: type) -> Callable[..., Any]:
+        """Return a factory function for *cls* that auto-wires injected
+        parameters and accepts ``Assisted``-marked parameters as keyword
+        arguments.
+
+        Example::
+
+            class Payment:
+                def __init__(
+                    self,
+                    gateway: PaymentGateway,
+                    amount: Annotated[float, Assisted()],
+                    currency: Annotated[str, Assisted()],
+                ): ...
+
+            make_payment = container.create_factory(Payment)
+            payment = make_payment(amount=100.0, currency="USD")
+        """
+        assisted_params = _get_assisted_params(cls)
+        resolver = self
+
+        def factory(**caller_kwargs: Any) -> Any:
+            missing = set(assisted_params) - set(caller_kwargs)
+            if missing:
+                raise TypeError(
+                    f"Missing assisted argument(s) for {cls.__name__}: "
+                    f"{', '.join(sorted(missing))}"
+                )
+            injected = resolver.resolve_callable_args(
+                cls.__init__,  # type: ignore[misc]
+                config=resolver._get_config(),
+            )
+            injected.update(caller_kwargs)
+            return cls(**injected)
+
+        factory.__name__ = f"{cls.__name__}Factory"
+        factory.__qualname__ = f"{cls.__qualname__}Factory"
+        factory.__assisted_params__ = tuple(assisted_params)  # type: ignore[attr-defined]
+        return factory
+
+    # ------------------------------------------------------------------
     # Abstract hooks — implemented by Container / ScopedContainer
     # ------------------------------------------------------------------
 
@@ -150,6 +215,9 @@ class Resolver:
         raise NotImplementedError
 
     def resolve_multi(self, interface: type) -> list[Any]:
+        raise NotImplementedError
+
+    def resolve_map(self, interface: type) -> dict[str, Any]:
         raise NotImplementedError
 
     def register_teardown(self, gen: Any) -> None:
@@ -160,6 +228,10 @@ class Resolver:
 
     def _get_config(self) -> dict[str, Any] | None:
         return None
+
+    def _get_root_resolver(self) -> Resolver:
+        """Return the root container resolver for scope-safe ProviderWrapper binding."""
+        return self
 
     # ------------------------------------------------------------------
     # Config resolution
@@ -181,6 +253,38 @@ class Resolver:
                     f"Config key '{key}': cannot traverse into non-dict value at '{part}'"
                 )
         return current
+
+
+def _get_assisted_params(cls: type) -> list[str]:
+    """Return the names of parameters marked with ``Assisted()``."""
+    try:
+        hints = get_type_hints(cls.__init__, include_extras=True)  # type: ignore[misc]
+    except Exception:
+        return []
+    hints.pop("return", None)
+    sig = inspect.signature(cls.__init__)  # type: ignore[misc]
+    result: list[str] = []
+    for name, _param in sig.parameters.items():
+        if name == "self":
+            continue
+        hint = hints.get(name)
+        if hint is None:
+            continue
+        _base, metadata = _unwrap_annotated(hint)
+        if _find_marker(metadata, Assisted) is not None:
+            result.append(name)
+    return result
+
+
+def _is_provider_type(hint: Any) -> bool:
+    """Return True if *hint* is ``Provider[T]`` (our ProviderWrapper generic alias)."""
+    origin = get_origin(hint)
+    if origin is None:
+        return False
+    args = get_args(hint)
+    if not args:
+        return False
+    return origin is ProviderWrapper
 
 
 def _is_optional(hint: Any) -> bool:

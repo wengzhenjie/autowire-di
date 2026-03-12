@@ -6,11 +6,12 @@ from autowire_di.types import Binding, BindingKey, RegistrationError, make_key
 class Registry:
     """Stores type -> Binding mappings with support for named and multi-bindings."""
 
-    __slots__ = ("_bindings", "_multi_bindings")
+    __slots__ = ("_bindings", "_multi_bindings", "_map_bindings")
 
     def __init__(self) -> None:
         self._bindings: dict[BindingKey, Binding] = {}
         self._multi_bindings: dict[type, list[Binding]] = {}
+        self._map_bindings: dict[type, dict[str, Binding]] = {}
 
     # ------------------------------------------------------------------
     # Single bindings
@@ -50,6 +51,19 @@ class Registry:
 
     def has_multi(self, interface: type) -> bool:
         return interface in self._multi_bindings
+
+    # ------------------------------------------------------------------
+    # Map-bindings  (dict[str, T] resolution)
+    # ------------------------------------------------------------------
+
+    def add_map(self, interface: type, key: str, binding: Binding) -> None:
+        self._map_bindings.setdefault(interface, {})[key] = binding
+
+    def get_map(self, interface: type) -> dict[str, Binding]:
+        return dict(self._map_bindings.get(interface, {}))
+
+    def has_map(self, interface: type) -> bool:
+        return interface in self._map_bindings
 
     # ------------------------------------------------------------------
     # Iteration / introspection

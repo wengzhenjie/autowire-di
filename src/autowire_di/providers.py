@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Generic, Protocol, TypeVar, runtime_checkable
+
+_T = TypeVar("_T")
 
 
 @runtime_checkable
@@ -122,6 +124,51 @@ class FactoryProvider:
 
     def __repr__(self) -> str:
         return f"FactoryProvider({self._factory!r})"
+
+
+class ProviderWrapper(Generic[_T]):
+    """A lazy wrapper that defers resolution to each ``.get()`` call.
+
+    Injected when a constructor parameter is typed as ``ProviderWrapper[T]``.
+    This enables:
+    - Lazy instantiation (expensive deps created only when needed)
+    - Multiple instances from a single injection point
+    - Safe cross-scope access (Singleton can hold ``ProviderWrapper[ScopedService]``)
+    """
+
+    def __init__(self, interface: type, resolver: Any, *, name: str | None = None) -> None:
+        self._interface = interface
+        self._name = name
+        self._resolver = resolver
+
+    def get(self) -> Any:
+        return self._resolver.resolve(self._interface, name=self._name)
+
+    def __repr__(self) -> str:
+        suffix = f", name={self._name!r}" if self._name else ""
+        return f"ProviderWrapper({self._interface.__name__}{suffix})"
+
+
+class _ChildContainerProvider:
+    """Resolves from a captured child container — used by PrivateModule
+    to delegate resolution to the private scope while exposing the result."""
+
+    __slots__ = ("_child", "_interface", "_name")
+
+    def __init__(self, child: Any, interface: type, name: str | None = None) -> None:
+        self._child = child
+        self._interface = interface
+        self._name = name
+
+    def provide(self, resolver: Any) -> Any:
+        return self._child.resolve(self._interface, name=self._name)
+
+    def is_async(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        suffix = f", name={self._name!r}" if self._name else ""
+        return f"_ChildContainerProvider({self._interface.__name__}{suffix})"
 
 
 class AliasProvider:
