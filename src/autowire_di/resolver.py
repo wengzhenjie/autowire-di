@@ -4,11 +4,15 @@ graphs and create instances automatically."""
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, get_args, get_origin, get_type_hints
+import logging
+from abc import abstractmethod
+from typing import Any, Callable, Generator, get_args, get_origin, get_type_hints
 
 from autowire_di.markers import Assisted, Inject, Named
 from autowire_di.providers import ProviderWrapper
-from autowire_di.types import CircularDependencyError, ResolutionError
+from autowire_di.types import CircularDependencyError, ResolverProtocol, ResolutionError
+
+_logger = logging.getLogger("autowire_di")
 
 
 def _is_abstract(cls: type) -> bool:
@@ -26,7 +30,6 @@ def _unwrap_annotated(hint: Any) -> tuple[type, list[Any]]:
     otherwise ``(hint, [])``."""
     if get_origin(hint) is not None:
         args = get_args(hint)
-        # typing.Annotated has origin = typing.Annotated in 3.11+
         try:
             from typing import Annotated
             if get_origin(hint) is Annotated:
@@ -43,7 +46,7 @@ def _find_marker(metadata: list[Any], marker_type: type) -> Any | None:
     return None
 
 
-class Resolver:
+class Resolver(ResolverProtocol):
     """Resolves constructor parameters using type hints and a lookup callback."""
 
     def resolve_callable_args(
@@ -61,6 +64,11 @@ class Resolver:
         try:
             hints = get_type_hints(fn, include_extras=True)
         except Exception:
+            _logger.warning(
+                "Failed to resolve type hints for %r; treating as zero-argument callable",
+                fn,
+                exc_info=True,
+            )
             return {}
 
         hints.pop("return", None)
@@ -81,27 +89,22 @@ class Resolver:
 
             base_type, metadata = _unwrap_annotated(hint)
 
-            # --- Inject(config=...) marker ---
             inject_marker = _find_marker(metadata, Inject)
             if inject_marker is not None:
                 kwargs[name] = self._resolve_config(inject_marker.config, config)
                 continue
 
-            # --- Assisted() marker — skip, caller provides this ---
             if _find_marker(metadata, Assisted) is not None:
                 continue
 
-            # --- Named(...) marker ---
             named_marker = _find_marker(metadata, Named)
             dep_name = named_marker.name if named_marker else None
 
-            # --- Provider[T] lazy injection ---
             if _is_provider_type(base_type):
                 inner = get_args(base_type)[0]
                 kwargs[name] = ProviderWrapper(inner, self, name=dep_name)
                 continue
 
-            # --- list[T] multi-binding ---
             origin = get_origin(base_type)
             if origin is list:
                 inner_args = get_args(base_type)
@@ -112,7 +115,6 @@ class Resolver:
                     except (ResolutionError, AttributeError):
                         pass
 
-            # --- dict[str, T] map-binding ---
             if origin is dict:
                 inner_args = get_args(base_type)
                 if len(inner_args) == 2 and inner_args[0] is str:
@@ -122,7 +124,6 @@ class Resolver:
                     except (ResolutionError, AttributeError):
                         pass
 
-            # --- Normal resolution ---
             try:
                 kwargs[name] = self.resolve(base_type, name=dep_name, _chain=chain)
             except ResolutionError:
@@ -211,20 +212,20 @@ class Resolver:
     # Abstract hooks — implemented by Container / ScopedContainer
     # ------------------------------------------------------------------
 
-    def resolve(self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()) -> Any:
-        raise NotImplementedError
+    @abstractmethod
+    def resolve(self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()) -> Any: ...
 
-    def resolve_multi(self, interface: type) -> list[Any]:
-        raise NotImplementedError
+    @abstractmethod
+    def resolve_multi(self, interface: type) -> list[Any]: ...
 
-    def resolve_map(self, interface: type) -> dict[str, Any]:
-        raise NotImplementedError
+    @abstractmethod
+    def resolve_map(self, interface: type) -> dict[str, Any]: ...
 
-    def register_teardown(self, gen: Any) -> None:
-        raise NotImplementedError
+    @abstractmethod
+    def register_teardown(self, gen: Generator[Any, None, None]) -> None: ...
 
-    def register_async_teardown(self, agen: Any) -> None:
-        raise NotImplementedError
+    @abstractmethod
+    def register_async_teardown(self, agen: Any) -> None: ...
 
     def _get_config(self) -> dict[str, Any] | None:
         return None
@@ -294,7 +295,6 @@ def _is_optional(hint: Any) -> bool:
     origin = get_origin(hint)
     if origin is builtin_types.UnionType:
         return type(None) in get_args(hint)
-    # typing.Union
     try:
         import typing
         if origin is typing.Union:

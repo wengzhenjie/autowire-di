@@ -99,12 +99,7 @@ class _AnnotatedWithMatcher(Matcher):
         self._annotation = annotation
 
     def matches(self, target: Any) -> bool:
-        markers = getattr(target, "__aop_markers__", set())
-        if self._annotation in markers:
-            return True
-        if isinstance(target, type):
-            return self._annotation in getattr(target, "__aop_markers__", set())
-        return False
+        return self._annotation in getattr(target, "__aop_markers__", set())
 
     def __repr__(self) -> str:
         return f"annotated_with({self._annotation.__name__})"

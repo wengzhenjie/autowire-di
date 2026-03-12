@@ -4,6 +4,8 @@ import asyncio
 import inspect
 from typing import Any, Callable, Generic, Protocol, TypeVar, runtime_checkable
 
+from autowire_di.types import ResolverProtocol
+
 _T = TypeVar("_T")
 
 
@@ -11,7 +13,7 @@ _T = TypeVar("_T")
 class Provider(Protocol):
     """Strategy for creating a dependency instance."""
 
-    def provide(self, resolver: Any) -> Any:
+    def provide(self, resolver: ResolverProtocol) -> Any:
         """Create and return an instance.  *resolver* is the active resolver
         (typically the Container or ScopedContainer) used to resolve nested
         dependencies."""
@@ -30,7 +32,7 @@ class ClassProvider:
     def __init__(self, cls: type) -> None:
         self.cls = cls
 
-    def provide(self, resolver: Any) -> Any:
+    def provide(self, resolver: ResolverProtocol) -> Any:
         return resolver.create_instance(self.cls)
 
     def is_async(self) -> bool:
@@ -48,7 +50,7 @@ class ValueProvider:
     def __init__(self, value: Any) -> None:
         self._value = value
 
-    def provide(self, resolver: Any) -> Any:
+    def provide(self, resolver: ResolverProtocol) -> Any:
         return self._value
 
     def is_async(self) -> bool:
@@ -89,7 +91,7 @@ class FactoryProvider:
     def is_async_generator(self) -> bool:
         return self._is_async_gen
 
-    def provide(self, resolver: Any) -> Any:
+    def provide(self, resolver: ResolverProtocol) -> Any:
         kwargs = resolver.resolve_callable_args(self._factory)
         if self._is_gen:
             gen = self._factory(**kwargs)
@@ -103,7 +105,7 @@ class FactoryProvider:
             )
         return self._factory(**kwargs)
 
-    async def async_provide(self, resolver: Any) -> Any:
+    async def async_provide(self, resolver: ResolverProtocol) -> Any:
         kwargs = resolver.resolve_callable_args(self._factory)
         if self._is_async_gen:
             agen = self._factory(**kwargs)
@@ -136,7 +138,7 @@ class ProviderWrapper(Generic[_T]):
     - Safe cross-scope access (Singleton can hold ``ProviderWrapper[ScopedService]``)
     """
 
-    def __init__(self, interface: type, resolver: Any, *, name: str | None = None) -> None:
+    def __init__(self, interface: type, resolver: ResolverProtocol, *, name: str | None = None) -> None:
         self._interface = interface
         self._name = name
         self._resolver = resolver
@@ -155,12 +157,12 @@ class _ChildContainerProvider:
 
     __slots__ = ("_child", "_interface", "_name")
 
-    def __init__(self, child: Any, interface: type, name: str | None = None) -> None:
+    def __init__(self, child: ResolverProtocol, interface: type, name: str | None = None) -> None:
         self._child = child
         self._interface = interface
         self._name = name
 
-    def provide(self, resolver: Any) -> Any:
+    def provide(self, resolver: ResolverProtocol) -> Any:
         return self._child.resolve(self._interface, name=self._name)
 
     def is_async(self) -> bool:
@@ -188,7 +190,7 @@ class AliasProvider:
     def target_name(self) -> str | None:
         return self._target_name
 
-    def provide(self, resolver: Any) -> Any:
+    def provide(self, resolver: ResolverProtocol) -> Any:
         return resolver.resolve(self._target, name=self._target_name)
 
     def is_async(self) -> bool:

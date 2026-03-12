@@ -31,15 +31,168 @@ _SENTINEL = object()
 
 
 # ======================================================================
-# Mixin: Registration
+# Shared provide logic (eliminates duplication between Container and
+# ScopedContainer)
 # ======================================================================
 
 
-class _RegistrationMixin:
-    """Registration methods: register, register_multi, register_map, override."""
+def _sync_provide(
+    binding: Binding,
+    *,
+    resolver: Resolver,
+    singletons: SingletonCache,
+    scoped_cache: ScopedCache | None,
+    apply_interceptors: Callable[[Any], Any],
+    singleton_resolver: Resolver,
+) -> Any:
+    """Shared synchronous provide logic for both Container and ScopedContainer."""
+    key = make_key(binding.interface, binding.name)
 
-    _registry: Registry
-    _recipe_specs: list[BindingSpec]
+    if binding.scope == Scope.SINGLETON:
+        return singletons.get_or_create(
+            key, lambda: apply_interceptors(binding.provider.provide(singleton_resolver))
+        )
+
+    if binding.scope == Scope.SCOPED:
+        if scoped_cache is None:
+            raise ScopeNotActiveError(
+                f"Cannot resolve scoped service {binding.interface.__name__} "
+                f"outside of an active scope. Use container.new_scope()."
+            )
+        cached = scoped_cache.get(key)
+        if cached is not None:
+            return cached
+        value = apply_interceptors(binding.provider.provide(resolver))
+        scoped_cache.set(key, value)
+        return value
+
+    return apply_interceptors(binding.provider.provide(resolver))
+
+
+async def _async_provide(
+    binding: Binding,
+    *,
+    resolver: Resolver,
+    singletons: SingletonCache,
+    scoped_cache: ScopedCache | None,
+    apply_interceptors: Callable[[Any], Any],
+    singleton_resolver: Resolver,
+) -> Any:
+    """Shared asynchronous provide logic for both Container and ScopedContainer."""
+    key = make_key(binding.interface, binding.name)
+
+    if binding.scope == Scope.SINGLETON:
+        if singletons.has(key):
+            return singletons._instances[key]
+        if isinstance(binding.provider, FactoryProvider) and binding.provider.is_async():
+            value = await binding.provider.async_provide(singleton_resolver)
+        else:
+            value = binding.provider.provide(singleton_resolver)
+        value = apply_interceptors(value)
+        singletons.set(key, value)
+        return value
+
+    if binding.scope == Scope.SCOPED:
+        if scoped_cache is None:
+            raise ScopeNotActiveError(
+                f"Cannot resolve scoped service {binding.interface.__name__} "
+                f"outside of an active scope. Use container.new_async_scope()."
+            )
+        cached = scoped_cache.get(key)
+        if cached is not None:
+            return cached
+        if isinstance(binding.provider, FactoryProvider) and binding.provider.is_async():
+            value = await binding.provider.async_provide(resolver)
+        else:
+            value = binding.provider.provide(resolver)
+        value = apply_interceptors(value)
+        scoped_cache.set(key, value)
+        return value
+
+    if isinstance(binding.provider, FactoryProvider) and binding.provider.is_async():
+        return apply_interceptors(await binding.provider.async_provide(resolver))
+    return apply_interceptors(binding.provider.provide(resolver))
+
+
+def _resolve_or_autowire(
+    resolver: Resolver,
+    lookup: Callable[[type, str | None], Binding | None],
+    interface: type,
+    name: str | None,
+    chain: tuple[type, ...],
+) -> tuple[Binding | None, Any]:
+    """Look up a binding; if not found and the type is concrete, auto-wire it.
+
+    Returns ``(binding, None)`` when a binding is found, or
+    ``(None, instance)`` when auto-wired.  Raises ``ResolutionError``
+    when neither is possible.
+    """
+    binding = lookup(interface, name)
+    if binding is not None:
+        return binding, None
+    if not _is_abstract(interface) and isinstance(interface, type):
+        return None, resolver.create_instance(interface, chain=chain)
+    raise ResolutionError(
+        f"No binding registered for {interface.__name__}"
+        + (f" (name={name!r})" if name else "")
+    )
+
+
+# ======================================================================
+# Container
+# ======================================================================
+
+
+class Container(Resolver):
+    """Dependency injection container with auto-wiring, scoped lifecycles,
+    and async support.
+
+    Usage::
+
+        container = Container()
+        container.register(OrderRepository, PostgresOrderRepository)
+        container.register(DatabasePool, PostgresPool, scope=Scope.SINGLETON)
+        service = container.resolve(OrderService)
+    """
+
+    def __init__(
+        self,
+        *,
+        parent: Container | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        self._registry = Registry()
+        self._singletons = SingletonCache()
+        self._parent = parent
+        self._config = config
+        self._teardowns: list[Generator[Any, None, None]] = []
+        self._async_teardowns: list[Any] = []
+        self._interceptor_bindings: list[InterceptorBinding] = []
+        self._recipe_modules: list[Any] = []
+        self._recipe_specs: list[BindingSpec] = []
+
+    # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
+
+    @property
+    def config(self) -> dict[str, Any] | None:
+        if self._config is not None:
+            return self._config
+        if self._parent is not None:
+            return self._parent.config
+        return None
+
+    def set_config(self, config: dict[str, Any]) -> None:
+        self._config = config
+        self._recipe_specs.append(BindingSpec(op=_Op.SET_CONFIG, instance=config))
+
+    def _get_config(self) -> dict[str, Any] | None:
+        return self.config
+
+    # ------------------------------------------------------------------
+    # Registration
+    # ------------------------------------------------------------------
 
     def register(
         self,
@@ -136,31 +289,21 @@ class _RegistrationMixin:
             scope=effective_scope, name=name,
         ))
 
-
-# ======================================================================
-# Mixin: Lifecycle (teardown, eager init, dispose)
-# ======================================================================
-
-
-class _LifecycleMixin:
-    """Lifecycle management: teardown registration, eager init, dispose."""
-
-    _registry: Registry
-    _teardowns: list[Generator[Any, None, None]]
-    _async_teardowns: list[Any]
-    _singletons: SingletonCache
+    # ------------------------------------------------------------------
+    # Lifecycle (teardown, eager init, dispose)
+    # ------------------------------------------------------------------
 
     def initialize_singletons(self) -> None:
         """Eagerly create all singleton instances marked with ``eager=True``."""
         for binding in self._registry.all_bindings():
             if binding.scope == Scope.SINGLETON and binding.eager:
-                self.resolve(binding.interface, name=binding.name)  # type: ignore[attr-defined]
+                self.resolve(binding.interface, name=binding.name)
 
     async def async_initialize_singletons(self) -> None:
         """Async version of :meth:`initialize_singletons`."""
         for binding in self._registry.all_bindings():
             if binding.scope == Scope.SINGLETON and binding.eager:
-                await self.async_resolve(binding.interface, name=binding.name)  # type: ignore[attr-defined]
+                await self.async_resolve(binding.interface, name=binding.name)
 
     def register_teardown(self, gen: Generator[Any, None, None]) -> None:
         self._teardowns.append(gen)
@@ -169,41 +312,44 @@ class _LifecycleMixin:
         self._async_teardowns.append(agen)
 
     def dispose(self) -> None:
+        errors: list[Exception] = []
         for gen in reversed(self._teardowns):
             try:
                 next(gen, None)
             except StopIteration:
                 pass
+            except Exception as exc:
+                errors.append(exc)
         self._teardowns.clear()
         self._singletons.clear()
+        if errors:
+            raise ExceptionGroup("Errors during container teardown", errors)
 
     async def async_dispose(self) -> None:
+        errors: list[Exception] = []
         for agen in reversed(self._async_teardowns):
             try:
                 await agen.__anext__()
             except StopAsyncIteration:
                 pass
+            except Exception as exc:
+                errors.append(exc)
         self._async_teardowns.clear()
         for gen in reversed(self._teardowns):
             try:
                 next(gen, None)
             except StopIteration:
                 pass
+            except Exception as exc:
+                errors.append(exc)
         self._teardowns.clear()
         self._singletons.clear()
+        if errors:
+            raise ExceptionGroup("Errors during async container teardown", errors)
 
-
-# ======================================================================
-# Mixin: Interception (AOP)
-# ======================================================================
-
-
-class _InterceptionMixin:
-    """AOP method interception support."""
-
-    _interceptor_bindings: list[InterceptorBinding]
-    _parent: Container | None
-    _recipe_specs: list[BindingSpec]
+    # ------------------------------------------------------------------
+    # AOP interception
+    # ------------------------------------------------------------------
 
     def bind_interceptor(
         self,
@@ -234,102 +380,73 @@ class _InterceptionMixin:
 
     def _all_interceptor_bindings(self) -> list[InterceptorBinding]:
         if self._parent is not None:
-            return self._parent._all_interceptor_bindings() + self._interceptor_bindings  # type: ignore[union-attr]
+            return self._parent._all_interceptor_bindings() + self._interceptor_bindings
         return list(self._interceptor_bindings)
-
-
-# ======================================================================
-# Container
-# ======================================================================
-
-
-class Container(_RegistrationMixin, _LifecycleMixin, _InterceptionMixin, Resolver):
-    """Dependency injection container with auto-wiring, scoped lifecycles,
-    and async support.
-
-    Usage::
-
-        container = Container()
-        container.register(OrderRepository, PostgresOrderRepository)
-        container.register(DatabasePool, PostgresPool, scope=Scope.SINGLETON)
-        service = container.resolve(OrderService)
-    """
-
-    def __init__(
-        self,
-        *,
-        parent: Container | None = None,
-        config: dict[str, Any] | None = None,
-    ) -> None:
-        self._registry = Registry()
-        self._singletons = SingletonCache()
-        self._parent = parent
-        self._config = config
-        self._teardowns: list[Generator[Any, None, None]] = []
-        self._async_teardowns: list[Any] = []
-        self._interceptor_bindings: list[InterceptorBinding] = []
-        self._recipe_modules: list[Any] = []
-        self._recipe_specs: list[BindingSpec] = []
-
-    # ------------------------------------------------------------------
-    # Configuration
-    # ------------------------------------------------------------------
-
-    @property
-    def config(self) -> dict[str, Any] | None:
-        if self._config is not None:
-            return self._config
-        if self._parent is not None:
-            return self._parent.config
-        return None
-
-    def set_config(self, config: dict[str, Any]) -> None:
-        self._config = config
-        self._recipe_specs.append(BindingSpec(op=_Op.SET_CONFIG, instance=config))
-
-    def _get_config(self) -> dict[str, Any] | None:
-        return self.config
 
     # ------------------------------------------------------------------
     # Resolution
     # ------------------------------------------------------------------
 
     def resolve(self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()) -> Any:
-        binding = self._lookup(interface, name)
+        binding, auto_wired = _resolve_or_autowire(self, self._lookup, interface, name, _chain)
         if binding is None:
-            if not _is_abstract(interface) and isinstance(interface, type):
-                return self.create_instance(interface, chain=_chain)
-            raise ResolutionError(
-                f"No binding registered for {interface.__name__}"
-                + (f" (name={name!r})" if name else "")
-            )
-        return self._provide(binding, chain=_chain)
+            return auto_wired
+        return _sync_provide(
+            binding,
+            resolver=self,
+            singletons=self._root_singletons,
+            scoped_cache=None,
+            apply_interceptors=self._apply_interceptors,
+            singleton_resolver=self,
+        )
+
+    async def async_resolve(
+        self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()
+    ) -> Any:
+        binding, auto_wired = _resolve_or_autowire(self, self._lookup, interface, name, _chain)
+        if binding is None:
+            return auto_wired
+        return await _async_provide(
+            binding,
+            resolver=self,
+            singletons=self._root_singletons,
+            scoped_cache=None,
+            apply_interceptors=self._apply_interceptors,
+            singleton_resolver=self,
+        )
 
     def resolve_multi(self, interface: type) -> list[Any]:
         bindings = self._get_multi_bindings(interface)
         if not bindings:
             raise ResolutionError(f"No multi-bindings registered for {interface.__name__}")
-        return [self._provide(b) for b in bindings]
+        return [
+            _sync_provide(
+                b,
+                resolver=self,
+                singletons=self._root_singletons,
+                scoped_cache=None,
+                apply_interceptors=self._apply_interceptors,
+                singleton_resolver=self,
+            )
+            for b in bindings
+        ]
 
     def resolve_map(self, interface: type) -> dict[str, Any]:
         """Resolve all map-bindings for *interface*, returning ``dict[str, T]``."""
         bindings = self._get_map_bindings(interface)
         if not bindings:
             raise ResolutionError(f"No map-bindings registered for {interface.__name__}")
-        return {k: self._provide(b) for k, b in bindings.items()}
-
-    async def async_resolve(
-        self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()
-    ) -> Any:
-        binding = self._lookup(interface, name)
-        if binding is None:
-            if not _is_abstract(interface) and isinstance(interface, type):
-                return self.create_instance(interface, chain=_chain)
-            raise ResolutionError(
-                f"No binding registered for {interface.__name__}"
-                + (f" (name={name!r})" if name else "")
+        return {
+            k: _sync_provide(
+                b,
+                resolver=self,
+                singletons=self._root_singletons,
+                scoped_cache=None,
+                apply_interceptors=self._apply_interceptors,
+                singleton_resolver=self,
             )
-        return await self._async_provide(binding, chain=_chain)
+            for k, b in bindings.items()
+        }
 
     # ------------------------------------------------------------------
     # Scope management
@@ -457,7 +574,7 @@ class Container(_RegistrationMixin, _LifecycleMixin, _InterceptionMixin, Resolve
         return self._registry
 
     # ------------------------------------------------------------------
-    # Internal
+    # Internal lookup helpers
     # ------------------------------------------------------------------
 
     def _lookup(self, interface: type, name: str | None = None) -> Binding | None:
@@ -478,40 +595,6 @@ class Container(_RegistrationMixin, _LifecycleMixin, _InterceptionMixin, Resolve
             parent_map = self._parent._get_map_bindings(interface)
         own = self._registry.get_map(interface)
         return {**parent_map, **own}
-
-    def _provide(self, binding: Binding, *, chain: tuple[type, ...] = ()) -> Any:
-        key = make_key(binding.interface, binding.name)
-        if binding.scope == Scope.SINGLETON:
-            return self._root_singletons.get_or_create(
-                key, lambda: self._apply_interceptors(binding.provider.provide(self))
-            )
-        if binding.scope == Scope.SCOPED:
-            raise ScopeNotActiveError(
-                f"Cannot resolve scoped service {binding.interface.__name__} "
-                f"outside of an active scope. Use container.new_scope()."
-            )
-        return self._apply_interceptors(binding.provider.provide(self))
-
-    async def _async_provide(self, binding: Binding, *, chain: tuple[type, ...] = ()) -> Any:
-        key = make_key(binding.interface, binding.name)
-        if binding.scope == Scope.SINGLETON:
-            if self._root_singletons.has(key):
-                return self._root_singletons._instances[key]
-            if isinstance(binding.provider, FactoryProvider) and binding.provider.is_async():
-                value = await binding.provider.async_provide(self)
-            else:
-                value = binding.provider.provide(self)
-            value = self._apply_interceptors(value)
-            self._root_singletons.set(key, value)
-            return value
-        if binding.scope == Scope.SCOPED:
-            raise ScopeNotActiveError(
-                f"Cannot resolve scoped service {binding.interface.__name__} "
-                f"outside of an active scope. Use container.new_async_scope()."
-            )
-        if isinstance(binding.provider, FactoryProvider) and binding.provider.is_async():
-            return self._apply_interceptors(await binding.provider.async_provide(self))
-        return self._apply_interceptors(binding.provider.provide(self))
 
     @property
     def _root_singletons(self) -> SingletonCache:
@@ -544,41 +627,73 @@ class ScopedContainer(Resolver):
     def _get_root_resolver(self) -> Container:
         return self._root
 
+    # ------------------------------------------------------------------
+    # Resolution (delegates to shared _sync_provide / _async_provide)
+    # ------------------------------------------------------------------
+
     def resolve(self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()) -> Any:
-        binding = self._root._lookup(interface, name)
+        binding, auto_wired = _resolve_or_autowire(self, self._root._lookup, interface, name, _chain)
         if binding is None:
-            if not _is_abstract(interface) and isinstance(interface, type):
-                return self.create_instance(interface, chain=_chain)
-            raise ResolutionError(
-                f"No binding registered for {interface.__name__}"
-                + (f" (name={name!r})" if name else "")
-            )
-        return self._provide(binding, chain=_chain)
+            return auto_wired
+        return _sync_provide(
+            binding,
+            resolver=self,
+            singletons=self._root._root_singletons,
+            scoped_cache=self._cache,
+            apply_interceptors=self._root._apply_interceptors,
+            singleton_resolver=self._root,
+        )
 
     async def async_resolve(
         self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()
     ) -> Any:
-        binding = self._root._lookup(interface, name)
+        binding, auto_wired = _resolve_or_autowire(self, self._root._lookup, interface, name, _chain)
         if binding is None:
-            if not _is_abstract(interface) and isinstance(interface, type):
-                return self.create_instance(interface, chain=_chain)
-            raise ResolutionError(
-                f"No binding registered for {interface.__name__}"
-                + (f" (name={name!r})" if name else "")
-            )
-        return await self._async_provide(binding, chain=_chain)
+            return auto_wired
+        return await _async_provide(
+            binding,
+            resolver=self,
+            singletons=self._root._root_singletons,
+            scoped_cache=self._cache,
+            apply_interceptors=self._root._apply_interceptors,
+            singleton_resolver=self._root,
+        )
 
     def resolve_multi(self, interface: type) -> list[Any]:
         bindings = self._root._get_multi_bindings(interface)
         if not bindings:
             raise ResolutionError(f"No multi-bindings registered for {interface.__name__}")
-        return [self._provide(b) for b in bindings]
+        return [
+            _sync_provide(
+                b,
+                resolver=self,
+                singletons=self._root._root_singletons,
+                scoped_cache=self._cache,
+                apply_interceptors=self._root._apply_interceptors,
+                singleton_resolver=self._root,
+            )
+            for b in bindings
+        ]
 
     def resolve_map(self, interface: type) -> dict[str, Any]:
         bindings = self._root._get_map_bindings(interface)
         if not bindings:
             raise ResolutionError(f"No map-bindings registered for {interface.__name__}")
-        return {k: self._provide(b) for k, b in bindings.items()}
+        return {
+            k: _sync_provide(
+                b,
+                resolver=self,
+                singletons=self._root._root_singletons,
+                scoped_cache=self._cache,
+                apply_interceptors=self._root._apply_interceptors,
+                singleton_resolver=self._root,
+            )
+            for k, b in bindings.items()
+        }
+
+    # ------------------------------------------------------------------
+    # Teardown / dispose
+    # ------------------------------------------------------------------
 
     def register_teardown(self, gen: Generator[Any, None, None]) -> None:
         self._cache.add_teardown(gen)
@@ -591,57 +706,6 @@ class ScopedContainer(Resolver):
 
     async def async_dispose(self) -> None:
         await self._cache.async_dispose()
-
-    def _apply_interceptors(self, instance: Any) -> Any:
-        return self._root._apply_interceptors(instance)
-
-    def _provide(self, binding: Binding, *, chain: tuple[type, ...] = ()) -> Any:
-        key = make_key(binding.interface, binding.name)
-
-        if binding.scope == Scope.SINGLETON:
-            return self._root._root_singletons.get_or_create(
-                key, lambda: self._root._apply_interceptors(binding.provider.provide(self._root))
-            )
-
-        if binding.scope == Scope.SCOPED:
-            cached = self._cache.get(key)
-            if cached is not None:
-                return cached
-            value = self._apply_interceptors(binding.provider.provide(self))
-            self._cache.set(key, value)
-            return value
-
-        return self._apply_interceptors(binding.provider.provide(self))
-
-    async def _async_provide(self, binding: Binding, *, chain: tuple[type, ...] = ()) -> Any:
-        key = make_key(binding.interface, binding.name)
-
-        if binding.scope == Scope.SINGLETON:
-            if self._root._root_singletons.has(key):
-                return self._root._root_singletons._instances[key]
-            if isinstance(binding.provider, FactoryProvider) and binding.provider.is_async():
-                value = await binding.provider.async_provide(self._root)
-            else:
-                value = binding.provider.provide(self._root)
-            value = self._root._apply_interceptors(value)
-            self._root._root_singletons.set(key, value)
-            return value
-
-        if binding.scope == Scope.SCOPED:
-            cached = self._cache.get(key)
-            if cached is not None:
-                return cached
-            if isinstance(binding.provider, FactoryProvider) and binding.provider.is_async():
-                value = await binding.provider.async_provide(self)
-            else:
-                value = binding.provider.provide(self)
-            value = self._apply_interceptors(value)
-            self._cache.set(key, value)
-            return value
-
-        if isinstance(binding.provider, FactoryProvider) and binding.provider.is_async():
-            return self._apply_interceptors(await binding.provider.async_provide(self))
-        return self._apply_interceptors(binding.provider.provide(self))
 
 
 # ======================================================================

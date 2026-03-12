@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Callable, Generator
 
 
 class Scope(Enum):
@@ -11,13 +12,47 @@ class Scope(Enum):
     SCOPED = "scoped"
 
 
+class ResolverProtocol(ABC):
+    """Minimal interface that Provider implementations depend on.
+
+    Defined here (in types) to break the circular import between
+    providers.py and resolver.py / container.py.
+    """
+
+    @abstractmethod
+    def resolve(self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()) -> Any: ...
+
+    @abstractmethod
+    def resolve_multi(self, interface: type) -> list[Any]: ...
+
+    @abstractmethod
+    def resolve_map(self, interface: type) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def create_instance(self, cls: type, *, chain: tuple[type, ...] = ()) -> Any: ...
+
+    @abstractmethod
+    def resolve_callable_args(
+        self,
+        fn: Callable[..., Any],
+        *,
+        chain: tuple[type, ...] = (),
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def register_teardown(self, gen: Generator[Any, None, None]) -> None: ...
+
+    @abstractmethod
+    def register_async_teardown(self, agen: Any) -> None: ...
+
+
 @dataclass(slots=True)
 class Binding:
     interface: type
-    provider: Any  # Provider instance — typed loosely to avoid circular import
+    provider: Any
     scope: Scope = Scope.TRANSIENT
     name: str | None = None
-    tags: dict[str, str] = field(default_factory=dict)
     eager: bool = False
 
 

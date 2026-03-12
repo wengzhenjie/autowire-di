@@ -73,44 +73,45 @@ class BindingSpec:
         if self.instance is not _UNSET:
             kw["instance"] = self.instance
 
-        if self.op is _Op.REGISTER:
-            container.register(
-                self.interface,  # type: ignore[arg-type]
-                kw.pop("implementation", None),
-                scope=self.scope,
-                name=self.name,
-                eager=self.eager,
-                **kw,
-            )
-        elif self.op is _Op.REGISTER_MULTI:
-            container.register_multi(
-                self.interface,  # type: ignore[arg-type]
-                kw.pop("implementation", None),
-                scope=self.scope,
-                **kw,
-            )
-        elif self.op is _Op.REGISTER_MAP:
-            container.register_map(
-                self.interface,  # type: ignore[arg-type]
-                self.name or "",
-                kw.pop("implementation", None),
-                scope=self.scope,
-                **kw,
-            )
-        elif self.op is _Op.OVERRIDE:
-            container.override(
-                self.interface,  # type: ignore[arg-type]
-                kw.pop("implementation", None),
-                scope=self.scope,
-                name=self.name,
-                **kw,
-            )
-        elif self.op is _Op.SET_CONFIG:
-            container.set_config(self.instance)
-        elif self.op is _Op.BIND_INTERCEPTOR:
-            if self.interceptor_args is not None:
-                class_matcher, method_matcher, interceptor = self.interceptor_args
-                container.bind_interceptor(class_matcher, method_matcher, interceptor)
+        match self.op:
+            case _Op.REGISTER:
+                container.register(
+                    self.interface,  # type: ignore[arg-type]
+                    kw.pop("implementation", None),
+                    scope=self.scope,
+                    name=self.name,
+                    eager=self.eager,
+                    **kw,
+                )
+            case _Op.REGISTER_MULTI:
+                container.register_multi(
+                    self.interface,  # type: ignore[arg-type]
+                    kw.pop("implementation", None),
+                    scope=self.scope,
+                    **kw,
+                )
+            case _Op.REGISTER_MAP:
+                container.register_map(
+                    self.interface,  # type: ignore[arg-type]
+                    self.name or "",
+                    kw.pop("implementation", None),
+                    scope=self.scope,
+                    **kw,
+                )
+            case _Op.OVERRIDE:
+                container.override(
+                    self.interface,  # type: ignore[arg-type]
+                    kw.pop("implementation", None),
+                    scope=self.scope,
+                    name=self.name,
+                    **kw,
+                )
+            case _Op.SET_CONFIG:
+                container.set_config(self.instance)
+            case _Op.BIND_INTERCEPTOR:
+                if self.interceptor_args is not None:
+                    class_matcher, method_matcher, interceptor = self.interceptor_args
+                    container.bind_interceptor(class_matcher, method_matcher, interceptor)
 
 
 @dataclass(slots=True)

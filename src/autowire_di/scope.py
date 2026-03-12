@@ -26,23 +26,6 @@ class SingletonCache:
                 self._instances[key] = factory()
             return self._instances[key]
 
-    async def async_get_or_create(self, key: BindingKey, factory: Any) -> Any:
-        if key in self._instances:
-            return self._instances[key]
-        with self._lock:
-            if key not in self._instances:
-                import asyncio
-                if asyncio.iscoroutine(factory):
-                    self._instances[key] = await factory
-                elif callable(factory):
-                    result = factory()
-                    if asyncio.iscoroutine(result):
-                        result = await result
-                    self._instances[key] = result
-                else:
-                    self._instances[key] = factory
-            return self._instances[key]
-
     def has(self, key: BindingKey) -> bool:
         return key in self._instances
 

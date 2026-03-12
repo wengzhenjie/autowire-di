@@ -1,6 +1,6 @@
 # autowire-di
 
-一个 Pythonic 的依赖注入框架，支持自动装配（auto-wiring）、作用域生命周期管理和异步解析。
+一个 Pythonic 的依赖注入框架，支持自动装配（auto-wiring）、作用域生命周期管理、AOP 方法拦截和异步解析。
 
 专为需要将 DI 容器序列化到远程 worker（如 Ray Data、Spark UDF）的分布式计算场景设计。
 
@@ -82,7 +82,7 @@ with container.new_scope() as scope2:
     assert s3 is not s1  # 不同作用域是不同实例
 ```
 
-### 三种注册方式
+### 四种注册方式
 
 ```python
 container = Container()
@@ -96,6 +96,10 @@ container.register(ICache, factory=lambda: RedisCache(host="localhost"))
 # 3. 实例注册（ValueProvider）：直接绑定已有对象
 cache = RedisCache(host="localhost")
 container.register(ICache, instance=cache)
+
+# 4. 别名注册（AliasProvider）：将一个接口指向另一个已注册的接口
+container.register(ICache, RedisCache)
+# 当解析 CacheService 时，实际解析 ICache
 ```
 
 ### 命名绑定
@@ -171,6 +175,25 @@ class EventBus:
         self.handlers = handlers
 ```
 
+### Map 绑定
+
+将同一接口的多个实现关联到字符串键，解析为 `dict[str, T]`：
+
+```python
+container = Container()
+container.register_map(ICache, "redis", RedisCache)
+container.register_map(ICache, "memory", MemoryCache)
+container.register_map(ICache, "disk", DiskCache)
+
+# 解析为字典
+caches = container.resolve_map(ICache)  # {"redis": RedisCache(), "memory": MemoryCache(), ...}
+
+# 也可以通过 dict[str, T] 类型注解自动注入
+class CacheManager:
+    def __init__(self, caches: dict[str, ICache]) -> None:
+        self.caches = caches
+```
+
 ### 模块系统
 
 将相关绑定组织为可复用的模块：
@@ -192,6 +215,27 @@ class DomainModule(Module):
 container = Container()
 container.install(InfraModule())
 container.install(DomainModule())
+```
+
+### 私有模块
+
+`PrivateModule` 的绑定默认对外不可见，只有通过 `expose()` 显式暴露的接口才能被父容器解析。适合封装内部实现细节：
+
+```python
+from autowire_di import Container, PrivateModule, Scope
+
+class PaymentModule(PrivateModule):
+    def configure(self, container: Container) -> None:
+        container.register(StripeClient, scope=Scope.SINGLETON)
+        container.register(PaymentValidator)
+        container.register(PaymentService, PaymentServiceImpl)
+        self.expose(PaymentService)  # 仅暴露 PaymentService
+
+container = Container()
+container.install(PaymentModule())
+
+container.resolve(PaymentService)  # OK
+container.resolve(StripeClient)    # ResolutionError — 内部实现不可见
 ```
 
 ### 工厂函数与资源清理
@@ -225,6 +269,106 @@ container.register(AsyncSession, factory=create_async_session, scope=Scope.SCOPE
 async with container.new_async_scope() as scope:
     session = await scope.async_resolve(AsyncSession)
 ```
+
+### Assisted 注入
+
+当一个类的构造参数中，部分由容器注入、部分由调用方提供时，使用 `Assisted` 标记 + `create_factory` 生成工厂函数：
+
+```python
+from typing import Annotated
+from autowire_di import Container, Assisted
+
+class Payment:
+    def __init__(
+        self,
+        gateway: PaymentGateway,                    # 由容器注入
+        amount: Annotated[float, Assisted()],       # 由调用方提供
+        currency: Annotated[str, Assisted()],       # 由调用方提供
+    ) -> None:
+        self.gateway = gateway
+        self.amount = amount
+        self.currency = currency
+
+container = Container()
+container.register(PaymentGateway, StripeGateway)
+
+make_payment = container.create_factory(Payment)
+payment = make_payment(amount=100.0, currency="USD")
+# gateway 自动注入，amount 和 currency 由调用方传入
+```
+
+### ProviderWrapper 懒注入
+
+当依赖创建开销较大，或需要在运行时按需获取多个实例时，使用 `ProviderWrapper[T]` 延迟解析：
+
+```python
+from autowire_di import Container, ProviderWrapper
+
+class ReportGenerator:
+    def __init__(self, db_provider: ProviderWrapper[DbSession]) -> None:
+        self._db_provider = db_provider
+
+    def generate(self) -> Report:
+        db = self._db_provider.get()  # 调用 get() 时才真正解析
+        return db.query(...)
+
+container = Container()
+container.register(DbSession, PostgresSession, scope=Scope.SCOPED)
+
+# ProviderWrapper[T] 类型注解会被自动识别，注入一个懒包装器
+# 这也解决了 Singleton 依赖 Scoped 的作用域不匹配问题
+```
+
+### AOP 方法拦截
+
+通过 `bind_interceptor` 声明式地为解析出的实例添加横切关注点（日志、事务、缓存、鉴权等），无需修改业务代码：
+
+```python
+from autowire_di import (
+    Container, MethodInterceptor, MethodInvocation,
+    annotated_with, any_method, aop_mark,
+)
+
+# 1. 定义标记
+class Transactional: pass
+
+# 2. 实现拦截器
+class LogInterceptor(MethodInterceptor):
+    def invoke(self, invocation: MethodInvocation) -> Any:
+        print(f"→ {invocation.method.__name__}({invocation.args})")
+        result = invocation.proceed()  # 调用下一个拦截器或真实方法
+        print(f"← {invocation.method.__name__} = {result}")
+        return result
+
+# 3. 用 @aop_mark 标记目标类
+@aop_mark(Transactional)
+class OrderService:
+    def place_order(self, item: str) -> str:
+        return f"ordered {item}"
+
+# 4. 绑定拦截器
+container = Container()
+container.bind_interceptor(
+    class_matcher=annotated_with(Transactional),
+    method_matcher=any_method(),
+    interceptor=LogInterceptor(),
+)
+
+service = container.resolve(OrderService)
+service.place_order("book")
+# → place_order(('book',))
+# ← place_order = ordered book
+```
+
+内置 Matcher 支持组合：
+
+| Matcher | 说明 |
+|---|---|
+| `any_class()` / `any_method()` | 匹配所有类/方法 |
+| `annotated_with(Marker)` | 匹配带有 `@aop_mark(Marker)` 的类/方法 |
+| `subclass_of(Base)` | 匹配 `Base` 的子类 |
+| `name_matches("get_*")` | 按名称 glob 模式匹配 |
+| `m1 & m2`、`m1 \| m2`、`~m` | 逻辑组合 |
 
 ### 子容器
 
@@ -339,14 +483,18 @@ service = rebuilt.resolve(TorchPredictor)
 
 ## 异常类型
 
+所有异常继承自 `DIError`。
+
 | 异常 | 触发场景 |
 |---|---|
+| `DIError` | 所有 DI 异常的基类 |
 | `ResolutionError` | 未注册的接口、缺失的配置键 |
-| `CircularDependencyError` | 检测到循环依赖链 |
+| `CircularDependencyError` | 检测到循环依赖链（A → B → C → A） |
 | `RegistrationError` | 重复注册（未使用 override） |
 | `ScopeMismatchError` | 长生命周期服务依赖短生命周期服务 |
 | `ScopeNotActiveError` | 在作用域外解析 SCOPED 服务 |
 | `ValidationError` | `validate()` 发现一个或多个错误 |
+| `ExceptionGroup` | `dispose()` 时多个 teardown 出错（Python 3.11+） |
 
 ## 项目结构
 
@@ -354,12 +502,13 @@ service = rebuilt.resolve(TorchPredictor)
 src/autowire_di/
 ├── __init__.py       # 公开 API 导出
 ├── container.py      # Container 和 ScopedContainer
-├── resolver.py       # 自动装配解析器（类型注解检查）
-├── registry.py       # 绑定存储（单绑定 + 多重绑定）
-├── providers.py      # ClassProvider / FactoryProvider / ValueProvider / AliasProvider
-├── types.py          # Scope 枚举、Binding 数据类、异常层次
-├── markers.py        # Annotated 标记：Named、Inject
-├── module.py         # Module 基类
+├── resolver.py       # 自动装配解析器（类型注解检查、create_factory）
+├── registry.py       # 绑定存储（单绑定 + 多重绑定 + Map 绑定）
+├── providers.py      # ClassProvider / FactoryProvider / ValueProvider / AliasProvider / ProviderWrapper
+├── types.py          # Scope 枚举、Binding 数据类、ResolverProtocol、异常层次
+├── markers.py        # Annotated 标记：Named、Inject、Assisted
+├── module.py         # Module 和 PrivateModule 基类
+├── interceptor.py    # AOP 方法拦截：MethodInterceptor、Matcher、代理生成
 ├── scope.py          # SingletonCache（线程安全）、ScopedCache
 ├── recipe.py         # ContainerRecipe：可序列化的容器快照
 └── validator.py      # 启动时依赖图静态验证
