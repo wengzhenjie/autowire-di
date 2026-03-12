@@ -3,13 +3,21 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Generator
+from typing import Any, AsyncGenerator, Callable, Generator, Protocol, runtime_checkable
 
 
 class Scope(Enum):
     TRANSIENT = "transient"
     SINGLETON = "singleton"
     SCOPED = "scoped"
+
+
+@runtime_checkable
+class ProviderProtocol(Protocol):
+    """Structural type for Provider — defined here to avoid circular imports."""
+
+    def provide(self, resolver: ResolverProtocol) -> Any: ...
+    def is_async(self) -> bool: ...
 
 
 class ResolverProtocol(ABC):
@@ -44,13 +52,13 @@ class ResolverProtocol(ABC):
     def register_teardown(self, gen: Generator[Any, None, None]) -> None: ...
 
     @abstractmethod
-    def register_async_teardown(self, agen: Any) -> None: ...
+    def register_async_teardown(self, agen: AsyncGenerator[Any, None]) -> None: ...
 
 
 @dataclass(slots=True)
 class Binding:
     interface: type
-    provider: Any
+    provider: ProviderProtocol
     scope: Scope = Scope.TRANSIENT
     name: str | None = None
     eager: bool = False

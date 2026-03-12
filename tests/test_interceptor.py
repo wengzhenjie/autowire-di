@@ -16,6 +16,7 @@ from autowire_di import (
     name_matches,
     subclass_of,
 )
+from autowire_di.interceptor import Matcher, _coerce_matcher
 
 
 # ---------------------------------------------------------------------------
@@ -354,3 +355,52 @@ class TestMethodLevelMarkers:
 
     def test_aop_mark_on_method(self) -> None:
         assert Logged in getattr(PaymentService.charge, "__aop_markers__", set())
+
+
+# ---------------------------------------------------------------------------
+# Callable matcher
+# ---------------------------------------------------------------------------
+
+
+class TestCallableMatcher:
+    def test_coerce_callable_to_matcher(self) -> None:
+        m = _coerce_matcher(lambda x: True)
+        assert isinstance(m, Matcher)
+        assert m.matches("anything") is True
+
+    def test_coerce_existing_matcher_is_noop(self) -> None:
+        original = annotated_with(Transactional)
+        result = _coerce_matcher(original)
+        assert result is original
+
+    def test_and_with_callable(self) -> None:
+        m = annotated_with(Transactional) & (lambda cls: hasattr(cls, "__aop_markers__"))
+        assert m.matches(type("X", (), {"__aop_markers__": {Transactional}})) is True
+        assert m.matches(type("Y", (), {})) is False
+
+    def test_or_with_callable(self) -> None:
+        m = annotated_with(Transactional) | (lambda cls: cls.__name__ == "Foo")
+        assert m.matches(type("Foo", (), {})) is True
+
+    def test_lambda_matcher_in_bind_interceptor(self) -> None:
+        class CountInterceptor(MethodInterceptor):
+            def __init__(self) -> None:
+                self.count = 0
+
+            def invoke(self, invocation: MethodInvocation) -> Any:
+                self.count += 1
+                return invocation.proceed()
+
+        counter = CountInterceptor()
+        c = Container()
+        c.register(SimpleService)
+        c.bind_interceptor(
+            _coerce_matcher(lambda cls: cls.__name__ == "SimpleService"),
+            _coerce_matcher(lambda m: m.__name__ == "greet"),
+            counter,
+        )
+
+        svc = c.resolve(SimpleService)
+        result = svc.greet("test")
+        assert result == "hello test"
+        assert counter.count == 1

@@ -13,6 +13,7 @@ from autowire_di import (
     Named,
     ResolutionError,
 )
+from autowire_di.resolver import _ParamKind, _analyze_params
 
 
 # ---------------------------------------------------------------------------
@@ -471,3 +472,128 @@ class TestMixedParameters:
         assert resolved.port == 9999
         # extra: int = 99 — when int is resolved, int() yields 0 (builtin instantiation)
         assert resolved.extra in (0, 99)
+
+
+# ---------------------------------------------------------------------------
+# Reflection cache (_analyze_params)
+# ---------------------------------------------------------------------------
+
+
+class TestReflectionCache:
+    def test_same_callable_returns_cached_specs(self) -> None:
+        def my_func(x: int, y: str) -> None:
+            pass
+
+        specs1 = _analyze_params(my_func)
+        specs2 = _analyze_params(my_func)
+        assert specs1 is specs2
+
+    def test_different_callables_have_independent_caches(self) -> None:
+        def func_a(x: int) -> None:
+            pass
+
+        def func_b(y: str) -> None:
+            pass
+
+        specs_a = _analyze_params(func_a)
+        specs_b = _analyze_params(func_b)
+        assert specs_a is not specs_b
+        assert specs_a[0].name == "x"
+        assert specs_b[0].name == "y"
+
+    def test_cache_handles_annotated_markers(self) -> None:
+        def func(
+            name: Annotated[str, Named("primary")],
+            timeout: Annotated[int, Inject(config="app.timeout")],
+        ) -> None:
+            pass
+
+        specs = _analyze_params(func)
+        assert len(specs) == 2
+
+        named_spec = next(s for s in specs if s.name == "name")
+        assert named_spec.kind == _ParamKind.DEPENDENCY
+        assert named_spec.dep_name == "primary"
+
+        config_spec = next(s for s in specs if s.name == "timeout")
+        assert config_spec.kind == _ParamKind.CONFIG
+        assert config_spec.config_key == "app.timeout"
+
+    def test_cache_handles_class_init(self) -> None:
+        class MyClass:
+            def __init__(self, pool: Database, name: str = "default") -> None:
+                pass
+
+        specs = _analyze_params(MyClass.__init__)
+        pool_spec = next(s for s in specs if s.name == "pool")
+        assert pool_spec.kind == _ParamKind.DEPENDENCY
+        assert pool_spec.base_type is Database
+        assert pool_spec.has_default is False
+
+        name_spec = next(s for s in specs if s.name == "name")
+        assert name_spec.has_default is True
+
+    def test_cache_handles_no_type_hints(self) -> None:
+        def bare_func(x, y):  # type: ignore[no-untyped-def]
+            pass
+
+        specs = _analyze_params(bare_func)
+        assert len(specs) == 2
+        for s in specs:
+            assert s.kind == _ParamKind.DEPENDENCY
+            assert s.base_type is None
+
+
+# ---------------------------------------------------------------------------
+# Error handling precision
+# ---------------------------------------------------------------------------
+
+
+class TestErrorHandlingPrecision:
+    def test_no_type_hints_function_returns_empty_specs(self) -> None:
+        def no_hints(x, y):  # type: ignore[no-untyped-def]
+            pass
+
+        specs = _analyze_params(no_hints)
+        assert all(s.base_type is None for s in specs)
+
+    def test_unresolvable_no_hint_no_default_raises(self) -> None:
+        def bad_func(x) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        c = Container()
+        with pytest.raises(ResolutionError, match="no type hint"):
+            c.resolve_callable_args(bad_func)
+
+    def test_multi_binding_not_found_raises_not_swallowed(self) -> None:
+        class NeedsMulti:
+            def __init__(self, caches: list[Cache]) -> None:
+                self.caches = caches
+
+        c = Container()
+        with pytest.raises(ResolutionError):
+            c.resolve(NeedsMulti)
+
+    def test_config_inject_with_default_falls_back(self) -> None:
+        class WithDefault:
+            def __init__(
+                self,
+                timeout: Annotated[int, Inject(config="app.timeout")] = 30,  # noqa: N805
+            ) -> None:
+                self.timeout = timeout
+
+        c = Container()
+        result = c.resolve(WithDefault)
+        assert result.timeout == 30
+
+    def test_config_inject_without_default_raises(self) -> None:
+        class WithoutDefault:
+            def __init__(
+                self,
+                timeout: Annotated[int, Inject(config="app.timeout")],
+            ) -> None:
+                self.timeout = timeout
+
+        c = Container()
+        with pytest.raises(ResolutionError, match="config"):
+            c.resolve(WithoutDefault)

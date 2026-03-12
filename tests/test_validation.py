@@ -7,6 +7,8 @@ from typing import Protocol
 import pytest
 
 from autowire_di import (
+    AliasProvider,
+    Binding,
     CircularDependencyError,
     Container,
     ResolutionError,
@@ -205,3 +207,76 @@ class TestAutoWirableConcrete:
         container = Container()
         container.register(ServiceWithConcreteDep)
         container.validate()  # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# Validator covers FactoryProvider and AliasProvider
+# ---------------------------------------------------------------------------
+
+
+class UserRepo:
+    def __init__(self, pool: PostgresRepository) -> None:
+        self.pool = pool
+
+
+class UserService:
+    def __init__(self, repo: UserRepo) -> None:
+        self.repo = repo
+
+
+class TestValidatorFactoryProvider:
+    def test_factory_with_missing_dep_detected(self) -> None:
+        def make_service(cache: Cache) -> UserService:
+            return UserService(repo=UserRepo(PostgresRepository()))  # type: ignore[return-value]
+
+        c = Container()
+        c.register(UserService, factory=make_service)
+        with pytest.raises(ValidationError) as exc_info:
+            c.validate()
+        assert any(
+            isinstance(e, ResolutionError) and "Cache" in str(e)
+            for e in exc_info.value.errors
+        )
+
+    def test_factory_with_all_deps_satisfied(self) -> None:
+        def make_repo(pool: PostgresRepository) -> UserRepo:
+            return UserRepo(pool)
+
+        c = Container()
+        c.register(PostgresRepository)
+        c.register(UserRepo, factory=make_repo)
+        c.validate()
+
+    def test_factory_scope_mismatch_detected(self) -> None:
+        def make_service(pool: PostgresRepository) -> UserService:
+            return UserService(repo=UserRepo(pool))  # type: ignore[return-value]
+
+        c = Container()
+        c.register(PostgresRepository, scope=Scope.SCOPED)
+        c.register(UserService, factory=make_service, scope=Scope.SINGLETON)
+        with pytest.raises(ValidationError) as exc_info:
+            c.validate()
+        assert any(isinstance(e, ScopeMismatchError) for e in exc_info.value.errors)
+
+
+class TestValidatorAliasProvider:
+    def test_alias_to_unregistered_concrete_ok(self) -> None:
+        c = Container()
+        alias_binding = Binding(
+            interface=Cache,
+            provider=AliasProvider(target=ConcreteHelper),
+            scope=Scope.TRANSIENT,
+        )
+        c.registry.add(alias_binding)
+        c.validate()
+
+    def test_alias_to_registered_type_passes(self) -> None:
+        c = Container()
+        c.register(ConcreteHelper)
+        alias_binding = Binding(
+            interface=Cache,
+            provider=AliasProvider(target=ConcreteHelper),
+            scope=Scope.TRANSIENT,
+        )
+        c.registry.add(alias_binding, allow_override=True)
+        c.validate()

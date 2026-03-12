@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from autowire_di import Container, Scope
@@ -183,3 +185,60 @@ class TestMixedSyncAndAsync:
             pool = await scope.async_resolve(Pool)
             assert isinstance(sync_svc, SyncService)
             assert isinstance(pool, Pool)
+
+
+# ---------------------------------------------------------------------------
+# Async singleton safety (asyncio.Lock)
+# ---------------------------------------------------------------------------
+
+
+class DbPool:
+    def __init__(self) -> None:
+        self.connected = True
+
+
+class TestAsyncSingletonSafety:
+    def test_async_singleton_returns_same_instance(self) -> None:
+        async def run() -> None:
+            c = Container()
+            c.register(DbPool, scope=Scope.SINGLETON)
+            p1 = await c.async_resolve(DbPool)
+            p2 = await c.async_resolve(DbPool)
+            assert p1 is p2
+
+        asyncio.run(run())
+
+    def test_async_singleton_concurrent_creation(self) -> None:
+        creation_count = 0
+
+        async def slow_factory() -> DbPool:
+            nonlocal creation_count
+            creation_count += 1
+            await asyncio.sleep(0.01)
+            return DbPool()
+
+        async def run() -> None:
+            c = Container()
+            c.register(DbPool, factory=slow_factory, scope=Scope.SINGLETON)
+
+            results = await asyncio.gather(
+                c.async_resolve(DbPool),
+                c.async_resolve(DbPool),
+                c.async_resolve(DbPool),
+            )
+            assert results[0] is results[1]
+            assert results[1] is results[2]
+
+        asyncio.run(run())
+        assert creation_count == 1
+
+    def test_async_singleton_in_scope(self) -> None:
+        async def run() -> None:
+            c = Container()
+            c.register(DbPool, scope=Scope.SINGLETON)
+            pool_direct = await c.async_resolve(DbPool)
+            async with c.new_async_scope() as scope:
+                pool_scoped = await scope.async_resolve(DbPool)
+            assert pool_direct is pool_scoped
+
+        asyncio.run(run())

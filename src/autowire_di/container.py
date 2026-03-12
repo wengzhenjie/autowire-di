@@ -4,7 +4,7 @@ ScopeManager, and Validator."""
 from __future__ import annotations
 
 from contextlib import contextmanager, asynccontextmanager
-from typing import Any, Callable, Generator, AsyncGenerator, TypeVar
+from typing import Any, AsyncGenerator, Callable, Generator, TypeVar
 
 from autowire_di.interceptor import InterceptorBinding, Matcher, MethodInterceptor, _create_proxy
 from autowire_di.providers import (
@@ -31,8 +31,7 @@ _SENTINEL = object()
 
 
 # ======================================================================
-# Shared provide logic (eliminates duplication between Container and
-# ScopedContainer)
+# Shared provide logic — lives on Resolver subclasses via _provide / _async_provide
 # ======================================================================
 
 
@@ -45,7 +44,6 @@ def _sync_provide(
     apply_interceptors: Callable[[Any], Any],
     singleton_resolver: Resolver,
 ) -> Any:
-    """Shared synchronous provide logic for both Container and ScopedContainer."""
     key = make_key(binding.interface, binding.name)
 
     if binding.scope == Scope.SINGLETON:
@@ -78,19 +76,16 @@ async def _async_provide(
     apply_interceptors: Callable[[Any], Any],
     singleton_resolver: Resolver,
 ) -> Any:
-    """Shared asynchronous provide logic for both Container and ScopedContainer."""
     key = make_key(binding.interface, binding.name)
 
     if binding.scope == Scope.SINGLETON:
-        if singletons.has(key):
-            return singletons._instances[key]
-        if isinstance(binding.provider, FactoryProvider) and binding.provider.is_async():
-            value = await binding.provider.async_provide(singleton_resolver)
-        else:
-            value = binding.provider.provide(singleton_resolver)
-        value = apply_interceptors(value)
-        singletons.set(key, value)
-        return value
+        cached = await singletons.async_get_or_create(
+            key,
+            binding.provider,
+            singleton_resolver,
+            apply_interceptors,
+        )
+        return cached
 
     if binding.scope == Scope.SCOPED:
         if scoped_cache is None:
@@ -121,12 +116,7 @@ def _resolve_or_autowire(
     name: str | None,
     chain: tuple[type, ...],
 ) -> tuple[Binding | None, Any]:
-    """Look up a binding; if not found and the type is concrete, auto-wire it.
-
-    Returns ``(binding, None)`` when a binding is found, or
-    ``(None, instance)`` when auto-wired.  Raises ``ResolutionError``
-    when neither is possible.
-    """
+    """Look up a binding; if not found and the type is concrete, auto-wire it."""
     binding = lookup(interface, name)
     if binding is not None:
         return binding, None
@@ -139,11 +129,106 @@ def _resolve_or_autowire(
 
 
 # ======================================================================
+# _ResolutionMixin — shared resolve methods for Container & ScopedContainer
+# ======================================================================
+
+
+class _ResolutionMixin(Resolver):
+    """Shared resolution logic. Subclasses provide the 'context' via
+    abstract properties: _ctx_singletons, _ctx_scoped_cache, etc."""
+
+    def _ctx_lookup(self, interface: type, name: str | None = None) -> Binding | None:
+        raise NotImplementedError
+
+    def _ctx_singletons(self) -> SingletonCache:
+        raise NotImplementedError
+
+    def _ctx_scoped_cache(self) -> ScopedCache | None:
+        raise NotImplementedError
+
+    def _ctx_apply_interceptors(self, instance: Any) -> Any:
+        raise NotImplementedError
+
+    def _ctx_singleton_resolver(self) -> Resolver:
+        raise NotImplementedError
+
+    def _ctx_multi_bindings(self, interface: type) -> list[Binding]:
+        raise NotImplementedError
+
+    def _ctx_map_bindings(self, interface: type) -> dict[str, Binding]:
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Unified resolution
+    # ------------------------------------------------------------------
+
+    def resolve(self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()) -> Any:
+        binding, auto_wired = _resolve_or_autowire(self, self._ctx_lookup, interface, name, _chain)
+        if binding is None:
+            return auto_wired
+        return _sync_provide(
+            binding,
+            resolver=self,
+            singletons=self._ctx_singletons(),
+            scoped_cache=self._ctx_scoped_cache(),
+            apply_interceptors=self._ctx_apply_interceptors,
+            singleton_resolver=self._ctx_singleton_resolver(),
+        )
+
+    async def async_resolve(
+        self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()
+    ) -> Any:
+        binding, auto_wired = _resolve_or_autowire(self, self._ctx_lookup, interface, name, _chain)
+        if binding is None:
+            return auto_wired
+        return await _async_provide(
+            binding,
+            resolver=self,
+            singletons=self._ctx_singletons(),
+            scoped_cache=self._ctx_scoped_cache(),
+            apply_interceptors=self._ctx_apply_interceptors,
+            singleton_resolver=self._ctx_singleton_resolver(),
+        )
+
+    def resolve_multi(self, interface: type) -> list[Any]:
+        bindings = self._ctx_multi_bindings(interface)
+        if not bindings:
+            raise ResolutionError(f"No multi-bindings registered for {interface.__name__}")
+        return [
+            _sync_provide(
+                b,
+                resolver=self,
+                singletons=self._ctx_singletons(),
+                scoped_cache=self._ctx_scoped_cache(),
+                apply_interceptors=self._ctx_apply_interceptors,
+                singleton_resolver=self._ctx_singleton_resolver(),
+            )
+            for b in bindings
+        ]
+
+    def resolve_map(self, interface: type) -> dict[str, Any]:
+        bindings = self._ctx_map_bindings(interface)
+        if not bindings:
+            raise ResolutionError(f"No map-bindings registered for {interface.__name__}")
+        return {
+            k: _sync_provide(
+                b,
+                resolver=self,
+                singletons=self._ctx_singletons(),
+                scoped_cache=self._ctx_scoped_cache(),
+                apply_interceptors=self._ctx_apply_interceptors,
+                singleton_resolver=self._ctx_singleton_resolver(),
+            )
+            for k, b in bindings.items()
+        }
+
+
+# ======================================================================
 # Container
 # ======================================================================
 
 
-class Container(Resolver):
+class Container(_ResolutionMixin):
     """Dependency injection container with auto-wiring, scoped lifecycles,
     and async support.
 
@@ -166,10 +251,35 @@ class Container(Resolver):
         self._parent = parent
         self._config = config
         self._teardowns: list[Generator[Any, None, None]] = []
-        self._async_teardowns: list[Any] = []
+        self._async_teardowns: list[AsyncGenerator[Any, None]] = []
         self._interceptor_bindings: list[InterceptorBinding] = []
         self._recipe_modules: list[Any] = []
         self._recipe_specs: list[BindingSpec] = []
+
+    # ------------------------------------------------------------------
+    # _ResolutionMixin context
+    # ------------------------------------------------------------------
+
+    def _ctx_lookup(self, interface: type, name: str | None = None) -> Binding | None:
+        return self._lookup(interface, name)
+
+    def _ctx_singletons(self) -> SingletonCache:
+        return self._root_singletons
+
+    def _ctx_scoped_cache(self) -> ScopedCache | None:
+        return None
+
+    def _ctx_apply_interceptors(self, instance: Any) -> Any:
+        return self._apply_interceptors(instance)
+
+    def _ctx_singleton_resolver(self) -> Resolver:
+        return self
+
+    def _ctx_multi_bindings(self, interface: type) -> list[Binding]:
+        return self._get_multi_bindings(interface)
+
+    def _ctx_map_bindings(self, interface: type) -> dict[str, Binding]:
+        return self._get_map_bindings(interface)
 
     # ------------------------------------------------------------------
     # Configuration
@@ -253,11 +363,7 @@ class Container(Resolver):
         instance: Any = _SENTINEL,
         scope: Scope = Scope.TRANSIENT,
     ) -> None:
-        """Add a map-binding: associates *key* with a provider for *interface*.
-
-        Resolve all entries via ``resolve_map(interface)`` which returns
-        ``dict[str, T]``.
-        """
+        """Add a map-binding: associates *key* with a provider for *interface*."""
         provider = _build_provider(interface, implementation, factory, instance)
         binding = Binding(interface=interface, provider=provider, scope=scope)
         self._registry.add_map(interface, key, binding)
@@ -308,7 +414,7 @@ class Container(Resolver):
     def register_teardown(self, gen: Generator[Any, None, None]) -> None:
         self._teardowns.append(gen)
 
-    def register_async_teardown(self, agen: Any) -> None:
+    def register_async_teardown(self, agen: AsyncGenerator[Any, None]) -> None:
         self._async_teardowns.append(agen)
 
     def dispose(self) -> None:
@@ -357,12 +463,7 @@ class Container(Resolver):
         method_matcher: Matcher,
         interceptor: MethodInterceptor,
     ) -> None:
-        """Register a method interceptor.
-
-        All instances resolved from this container whose class matches
-        *class_matcher* will have methods matching *method_matcher* wrapped
-        by *interceptor*.
-        """
+        """Register a method interceptor."""
         self._interceptor_bindings.append(
             InterceptorBinding(class_matcher, method_matcher, interceptor)
         )
@@ -372,7 +473,6 @@ class Container(Resolver):
         ))
 
     def _apply_interceptors(self, instance: Any) -> Any:
-        """Apply all registered interceptors to *instance*."""
         bindings = self._all_interceptor_bindings()
         if not bindings:
             return instance
@@ -382,71 +482,6 @@ class Container(Resolver):
         if self._parent is not None:
             return self._parent._all_interceptor_bindings() + self._interceptor_bindings
         return list(self._interceptor_bindings)
-
-    # ------------------------------------------------------------------
-    # Resolution
-    # ------------------------------------------------------------------
-
-    def resolve(self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()) -> Any:
-        binding, auto_wired = _resolve_or_autowire(self, self._lookup, interface, name, _chain)
-        if binding is None:
-            return auto_wired
-        return _sync_provide(
-            binding,
-            resolver=self,
-            singletons=self._root_singletons,
-            scoped_cache=None,
-            apply_interceptors=self._apply_interceptors,
-            singleton_resolver=self,
-        )
-
-    async def async_resolve(
-        self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()
-    ) -> Any:
-        binding, auto_wired = _resolve_or_autowire(self, self._lookup, interface, name, _chain)
-        if binding is None:
-            return auto_wired
-        return await _async_provide(
-            binding,
-            resolver=self,
-            singletons=self._root_singletons,
-            scoped_cache=None,
-            apply_interceptors=self._apply_interceptors,
-            singleton_resolver=self,
-        )
-
-    def resolve_multi(self, interface: type) -> list[Any]:
-        bindings = self._get_multi_bindings(interface)
-        if not bindings:
-            raise ResolutionError(f"No multi-bindings registered for {interface.__name__}")
-        return [
-            _sync_provide(
-                b,
-                resolver=self,
-                singletons=self._root_singletons,
-                scoped_cache=None,
-                apply_interceptors=self._apply_interceptors,
-                singleton_resolver=self,
-            )
-            for b in bindings
-        ]
-
-    def resolve_map(self, interface: type) -> dict[str, Any]:
-        """Resolve all map-bindings for *interface*, returning ``dict[str, T]``."""
-        bindings = self._get_map_bindings(interface)
-        if not bindings:
-            raise ResolutionError(f"No map-bindings registered for {interface.__name__}")
-        return {
-            k: _sync_provide(
-                b,
-                resolver=self,
-                singletons=self._root_singletons,
-                scoped_cache=None,
-                apply_interceptors=self._apply_interceptors,
-                singleton_resolver=self,
-            )
-            for k, b in bindings.items()
-        }
 
     # ------------------------------------------------------------------
     # Scope management
@@ -480,12 +515,7 @@ class Container(Resolver):
     # ------------------------------------------------------------------
 
     def install(self, module: Any) -> None:
-        """Install a :class:`Module` or :class:`PrivateModule`.
-
-        For a regular Module, calls ``module.configure(self)`` directly.
-        For a PrivateModule, bindings are registered on an internal child
-        container and only exposed bindings are promoted to this container.
-        """
+        """Install a :class:`Module` or :class:`PrivateModule`."""
         from autowire_di.module import PrivateModule
 
         self._recipe_modules.append(module)
@@ -531,14 +561,7 @@ class Container(Resolver):
     def make_injectable(self, cls: type[_T], **overrides: Any) -> type[_T]:
         """Return a zero-argument subclass of *cls* whose ``__init__``
         lazily rebuilds the container from a serializable recipe and
-        resolves all dependencies on the worker side.
-
-        The closure captures only the recipe (a pure-data snapshot of
-        registration instructions), *cls* (a regular class), and
-        *overrides* (simple values) — all safely serializable via
-        cloudpickle.  No live objects (model weights, connections, locks)
-        are captured.
-        """
+        resolves all dependencies on the worker side."""
         frozen_recipe = self.recipe
         frozen_overrides = dict(overrides)
 
@@ -608,7 +631,7 @@ class Container(Resolver):
 # ======================================================================
 
 
-class ScopedContainer(Resolver):
+class ScopedContainer(_ResolutionMixin):
     """A scoped child of a :class:`Container`, created via
     ``container.new_scope()`` or ``container.new_async_scope()``.
 
@@ -621,75 +644,36 @@ class ScopedContainer(Resolver):
         self._root = root
         self._cache = ScopedCache()
 
+    # ------------------------------------------------------------------
+    # _ResolutionMixin context
+    # ------------------------------------------------------------------
+
+    def _ctx_lookup(self, interface: type, name: str | None = None) -> Binding | None:
+        return self._root._lookup(interface, name)
+
+    def _ctx_singletons(self) -> SingletonCache:
+        return self._root._root_singletons
+
+    def _ctx_scoped_cache(self) -> ScopedCache | None:
+        return self._cache
+
+    def _ctx_apply_interceptors(self, instance: Any) -> Any:
+        return self._root._apply_interceptors(instance)
+
+    def _ctx_singleton_resolver(self) -> Resolver:
+        return self._root
+
+    def _ctx_multi_bindings(self, interface: type) -> list[Binding]:
+        return self._root._get_multi_bindings(interface)
+
+    def _ctx_map_bindings(self, interface: type) -> dict[str, Binding]:
+        return self._root._get_map_bindings(interface)
+
     def _get_config(self) -> dict[str, Any] | None:
         return self._root.config
 
     def _get_root_resolver(self) -> Container:
         return self._root
-
-    # ------------------------------------------------------------------
-    # Resolution (delegates to shared _sync_provide / _async_provide)
-    # ------------------------------------------------------------------
-
-    def resolve(self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()) -> Any:
-        binding, auto_wired = _resolve_or_autowire(self, self._root._lookup, interface, name, _chain)
-        if binding is None:
-            return auto_wired
-        return _sync_provide(
-            binding,
-            resolver=self,
-            singletons=self._root._root_singletons,
-            scoped_cache=self._cache,
-            apply_interceptors=self._root._apply_interceptors,
-            singleton_resolver=self._root,
-        )
-
-    async def async_resolve(
-        self, interface: type, *, name: str | None = None, _chain: tuple[type, ...] = ()
-    ) -> Any:
-        binding, auto_wired = _resolve_or_autowire(self, self._root._lookup, interface, name, _chain)
-        if binding is None:
-            return auto_wired
-        return await _async_provide(
-            binding,
-            resolver=self,
-            singletons=self._root._root_singletons,
-            scoped_cache=self._cache,
-            apply_interceptors=self._root._apply_interceptors,
-            singleton_resolver=self._root,
-        )
-
-    def resolve_multi(self, interface: type) -> list[Any]:
-        bindings = self._root._get_multi_bindings(interface)
-        if not bindings:
-            raise ResolutionError(f"No multi-bindings registered for {interface.__name__}")
-        return [
-            _sync_provide(
-                b,
-                resolver=self,
-                singletons=self._root._root_singletons,
-                scoped_cache=self._cache,
-                apply_interceptors=self._root._apply_interceptors,
-                singleton_resolver=self._root,
-            )
-            for b in bindings
-        ]
-
-    def resolve_map(self, interface: type) -> dict[str, Any]:
-        bindings = self._root._get_map_bindings(interface)
-        if not bindings:
-            raise ResolutionError(f"No map-bindings registered for {interface.__name__}")
-        return {
-            k: _sync_provide(
-                b,
-                resolver=self,
-                singletons=self._root._root_singletons,
-                scoped_cache=self._cache,
-                apply_interceptors=self._root._apply_interceptors,
-                singleton_resolver=self._root,
-            )
-            for k, b in bindings.items()
-        }
 
     # ------------------------------------------------------------------
     # Teardown / dispose
@@ -698,7 +682,7 @@ class ScopedContainer(Resolver):
     def register_teardown(self, gen: Generator[Any, None, None]) -> None:
         self._cache.add_teardown(gen)
 
-    def register_async_teardown(self, agen: Any) -> None:
+    def register_async_teardown(self, agen: AsyncGenerator[Any, None]) -> None:
         self._cache.add_async_teardown(agen)
 
     def dispose(self) -> None:

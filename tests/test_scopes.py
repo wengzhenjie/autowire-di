@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+import asyncio
+from typing import Protocol, runtime_checkable
+
 from autowire_di import Container, Scope, ScopeNotActiveError
 
 
@@ -218,3 +221,68 @@ class TestNestedScopedAutoWiring:
         assert b1 is b2
         assert b1.dep_a is a1
         assert b1.dep_a is b2.dep_a
+
+
+# ---------------------------------------------------------------------------
+# Resolution mixin deduplication
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class ICache(Protocol):
+    def get(self, key: str) -> str | None: ...
+
+
+class RedisCache:
+    def get(self, key: str) -> str | None:
+        return f"redis:{key}"
+
+
+class MemoryCache:
+    def get(self, key: str) -> str | None:
+        return f"mem:{key}"
+
+
+class DbPool:
+    def __init__(self) -> None:
+        self.connected = True
+
+
+class TestResolutionMixinDedup:
+    def test_container_and_scoped_resolve_same_singleton(self) -> None:
+        c = Container()
+        c.register(DbPool, scope=Scope.SINGLETON)
+
+        pool_from_container = c.resolve(DbPool)
+        with c.new_scope() as scope:
+            pool_from_scope = scope.resolve(DbPool)
+        assert pool_from_container is pool_from_scope
+
+    def test_scoped_resolve_multi(self) -> None:
+        c = Container()
+        c.register_multi(ICache, RedisCache)
+        c.register_multi(ICache, MemoryCache)
+
+        with c.new_scope() as scope:
+            caches = scope.resolve_multi(ICache)
+            assert len(caches) == 2
+            assert any(isinstance(x, RedisCache) for x in caches)
+            assert any(isinstance(x, MemoryCache) for x in caches)
+
+    def test_scoped_resolve_map(self) -> None:
+        c = Container()
+        c.register_map(ICache, "redis", RedisCache)
+        c.register_map(ICache, "memory", MemoryCache)
+
+        with c.new_scope() as scope:
+            caches = scope.resolve_map(ICache)
+            assert set(caches.keys()) == {"redis", "memory"}
+
+    def test_async_resolve_through_mixin(self) -> None:
+        async def run() -> None:
+            c = Container()
+            c.register(DbPool, scope=Scope.SINGLETON)
+            pool = await c.async_resolve(DbPool)
+            assert isinstance(pool, DbPool)
+
+        asyncio.run(run())

@@ -6,7 +6,17 @@ from typing import Protocol, runtime_checkable
 
 import pytest
 
-from autowire_di import Container, ResolutionError, RegistrationError, Scope, ScopeNotActiveError
+from typing import Any
+
+from autowire_di import (
+    AliasProvider,
+    Container,
+    ProviderProtocol,
+    RegistrationError,
+    ResolutionError,
+    Scope,
+    ScopeNotActiveError,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -468,3 +478,30 @@ class TestDispose:
         container.dispose()
         b = container.resolve(ConcreteService)
         assert a is not b  # New instance after dispose
+
+
+# ---------------------------------------------------------------------------
+# Type precision (ProviderProtocol)
+# ---------------------------------------------------------------------------
+
+
+class TestTypePrecision:
+    def test_binding_provider_is_provider_protocol(self) -> None:
+        c = Container()
+        c.register(ConcreteService)
+        binding = c.registry.all_bindings()[0]
+        assert isinstance(binding.provider, ProviderProtocol)
+
+    def test_custom_provider_protocol_compatible(self) -> None:
+        class MyProvider:
+            def provide(self, resolver: Any) -> str:
+                return "custom"
+
+            def is_async(self) -> bool:
+                return False
+
+        p = MyProvider()
+        assert isinstance(p, ProviderProtocol)
+
+    def test_alias_provider_is_provider_protocol(self) -> None:
+        assert isinstance(AliasProvider(target=ConcreteService), ProviderProtocol)

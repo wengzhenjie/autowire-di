@@ -15,10 +15,18 @@ Usage::
         method_matcher=any_method(),
         interceptor=LogInterceptor(),
     )
+
+    # Or use plain callables as matchers:
+    container.bind_interceptor(
+        class_matcher=lambda cls: hasattr(cls, "__aop_markers__"),
+        method_matcher=lambda m: not m.__name__.startswith("_"),
+        interceptor=LogInterceptor(),
+    )
 """
 
 from __future__ import annotations
 
+import fnmatch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -64,135 +72,98 @@ class MethodInterceptor(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Matchers
+# Matcher — supports both ABC subclasses and plain callables
 # ---------------------------------------------------------------------------
 
 
 class Matcher(ABC):
-    """Predicate for selecting classes or methods."""
+    """Predicate for selecting classes or methods.
+
+    Can also be used with plain ``Callable[[Any], bool]`` via the
+    ``_CallableMatcher`` adapter — see :func:`_coerce_matcher`.
+    """
 
     @abstractmethod
     def matches(self, target: Any) -> bool: ...
 
-    def __and__(self, other: Matcher) -> Matcher:
-        return _AndMatcher(self, other)
+    def __and__(self, other: Matcher | Callable[[Any], bool]) -> Matcher:
+        return _CompositeMatcher(lambda t, a=self, b=_coerce_matcher(other): a.matches(t) and b.matches(t))
 
-    def __or__(self, other: Matcher) -> Matcher:
-        return _OrMatcher(self, other)
+    def __or__(self, other: Matcher | Callable[[Any], bool]) -> Matcher:
+        return _CompositeMatcher(lambda t, a=self, b=_coerce_matcher(other): a.matches(t) or b.matches(t))
 
     def __invert__(self) -> Matcher:
-        return _NotMatcher(self)
+        return _CompositeMatcher(lambda t, inner=self: not inner.matches(t))
 
 
-class _AnyMatcher(Matcher):
+class _CompositeMatcher(Matcher):
+    """Matcher built from a predicate function — used for &, |, ~ composition."""
+    __slots__ = ("_fn",)
+
+    def __init__(self, fn: Callable[[Any], bool]) -> None:
+        self._fn = fn
+
     def matches(self, target: Any) -> bool:
-        return True
+        return self._fn(target)
+
+
+class _CallableMatcher(Matcher):
+    """Adapter: wraps a plain ``Callable[[Any], bool]`` as a Matcher."""
+    __slots__ = ("_fn",)
+
+    def __init__(self, fn: Callable[[Any], bool]) -> None:
+        self._fn = fn
+
+    def matches(self, target: Any) -> bool:
+        return self._fn(target)
 
     def __repr__(self) -> str:
-        return "any()"
+        return f"CallableMatcher({self._fn!r})"
 
 
-class _AnnotatedWithMatcher(Matcher):
-    __slots__ = ("_annotation",)
-
-    def __init__(self, annotation: type) -> None:
-        self._annotation = annotation
-
-    def matches(self, target: Any) -> bool:
-        return self._annotation in getattr(target, "__aop_markers__", set())
-
-    def __repr__(self) -> str:
-        return f"annotated_with({self._annotation.__name__})"
-
-
-class _SubclassOfMatcher(Matcher):
-    __slots__ = ("_parent",)
-
-    def __init__(self, parent: type) -> None:
-        self._parent = parent
-
-    def matches(self, target: Any) -> bool:
-        return isinstance(target, type) and issubclass(target, self._parent)
-
-    def __repr__(self) -> str:
-        return f"subclass_of({self._parent.__name__})"
-
-
-class _NameMatchesMatcher(Matcher):
-    __slots__ = ("_pattern",)
-
-    def __init__(self, pattern: str) -> None:
-        self._pattern = pattern
-
-    def matches(self, target: Any) -> bool:
-        import fnmatch
-        name = target.__name__ if hasattr(target, "__name__") else str(target)
-        return fnmatch.fnmatch(name, self._pattern)
-
-    def __repr__(self) -> str:
-        return f"name_matches({self._pattern!r})"
-
-
-class _AndMatcher(Matcher):
-    __slots__ = ("_a", "_b")
-
-    def __init__(self, a: Matcher, b: Matcher) -> None:
-        self._a = a
-        self._b = b
-
-    def matches(self, target: Any) -> bool:
-        return self._a.matches(target) and self._b.matches(target)
-
-
-class _OrMatcher(Matcher):
-    __slots__ = ("_a", "_b")
-
-    def __init__(self, a: Matcher, b: Matcher) -> None:
-        self._a = a
-        self._b = b
-
-    def matches(self, target: Any) -> bool:
-        return self._a.matches(target) or self._b.matches(target)
-
-
-class _NotMatcher(Matcher):
-    __slots__ = ("_inner",)
-
-    def __init__(self, inner: Matcher) -> None:
-        self._inner = inner
-
-    def matches(self, target: Any) -> bool:
-        return not self._inner.matches(target)
+def _coerce_matcher(m: Matcher | Callable[[Any], bool]) -> Matcher:
+    """Accept either a Matcher instance or a plain callable."""
+    if isinstance(m, Matcher):
+        return m
+    return _CallableMatcher(m)
 
 
 # ---------------------------------------------------------------------------
-# Public matcher factories
+# Built-in matcher factories
 # ---------------------------------------------------------------------------
 
 
 def any_method() -> Matcher:
     """Match any method."""
-    return _AnyMatcher()
+    return _CompositeMatcher(lambda _: True)
 
 
 def any_class() -> Matcher:
     """Match any class."""
-    return _AnyMatcher()
+    return _CompositeMatcher(lambda _: True)
 
 
 def annotated_with(annotation: type) -> Matcher:
     """Match classes/methods decorated with ``@annotation`` (via ``__aop_markers__``)."""
-    return _AnnotatedWithMatcher(annotation)
+    return _CompositeMatcher(
+        lambda target, a=annotation: a in getattr(target, "__aop_markers__", set())
+    )
 
 
 def subclass_of(parent: type) -> Matcher:
     """Match classes that are subclasses of *parent*."""
-    return _SubclassOfMatcher(parent)
+    return _CompositeMatcher(
+        lambda target, p=parent: isinstance(target, type) and issubclass(target, p)
+    )
 
 
 def name_matches(pattern: str) -> Matcher:
     """Match by name using fnmatch glob pattern."""
-    return _NameMatchesMatcher(pattern)
+    return _CompositeMatcher(
+        lambda target, pat=pattern: fnmatch.fnmatch(
+            target.__name__ if hasattr(target, "__name__") else str(target), pat
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

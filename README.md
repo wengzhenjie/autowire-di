@@ -1,8 +1,30 @@
 # autowire-di
 
+[![Python](https://img.shields.io/badge/python-≥3.11-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/autowire-di.svg)](https://pypi.org/project/autowire-di/)
+
 一个 Pythonic 的依赖注入框架，支持自动装配（auto-wiring）、作用域生命周期管理、AOP 方法拦截和异步解析。
 
 专为需要将 DI 容器序列化到远程 worker（如 Ray Data、Spark UDF）的分布式计算场景设计。
+
+## 特性一览
+
+- **自动装配** — 通过 `__init__` 类型注解自动构建依赖图，零配置
+- **三种作用域** — Transient / Singleton / Scoped，线程安全
+- **四种注册方式** — 类注册、工厂函数、实例注册、别名注册
+- **命名绑定** — `Annotated[T, Named("name")]` 区分同接口多实现
+- **配置注入** — `Annotated[T, Inject(config="a.b.c")]` 点号路径注入
+- **多重绑定 & Map 绑定** — `list[T]` / `dict[str, T]` 自动注入
+- **模块系统** — `Module` / `PrivateModule` 组织和封装绑定
+- **AOP 方法拦截** — 声明式横切关注点，支持 Matcher 组合
+- **Assisted 注入** — 部分参数由容器注入，部分由调用方提供
+- **ProviderWrapper 懒注入** — 延迟解析，解决作用域不匹配问题
+- **异步支持** — `async_resolve`、异步工厂、异步作用域
+- **启动时验证** — 一次性检测缺失绑定、循环依赖、作用域不匹配
+- **分布式计算集成** — `make_injectable` 生成可序列化的零参数子类
+- **子容器** — 继承父容器绑定，独立覆盖
+- **零依赖** — 核心库无第三方依赖
 
 ## 安装
 
@@ -10,9 +32,13 @@
 uv add autowire-di
 ```
 
-## 快速开始
+或使用 pip：
 
-### 基本注册与解析
+```bash
+pip install autowire-di
+```
+
+## 快速开始
 
 ```python
 from autowire_di import Container, Scope
@@ -29,12 +55,38 @@ container.register(DatabasePool, PostgresPool, scope=Scope.SINGLETON)
 service = container.resolve(OrderService)
 ```
 
-### 自动装配
+## 目录
+
+- [自动装配](#自动装配)
+- [三种作用域](#三种作用域)
+- [四种注册方式](#四种注册方式)
+- [命名绑定](#命名绑定)
+- [配置注入](#配置注入)
+- [多重绑定](#多重绑定)
+- [Map 绑定](#map-绑定)
+- [模块系统](#模块系统)
+- [私有模块](#私有模块)
+- [工厂函数与资源清理](#工厂函数与资源清理)
+- [Assisted 注入](#assisted-注入)
+- [ProviderWrapper 懒注入](#providerwrapper-懒注入)
+- [AOP 方法拦截](#aop-方法拦截)
+- [异步支持](#异步支持)
+- [子容器](#子容器)
+- [启动时验证](#启动时验证)
+- [分布式计算集成](#分布式计算集成)
+- [异常类型](#异常类型)
+- [API 参考](#api-参考)
+- [示例](#示例)
+- [项目结构](#项目结构)
+- [开发](#开发)
+
+## 自动装配
 
 容器通过检查 `__init__` 的类型注解自动构建依赖图，无需手动连接：
 
 ```python
 from typing import Protocol, runtime_checkable
+from autowire_di import Container
 
 @runtime_checkable
 class UserRepository(Protocol):
@@ -56,7 +108,7 @@ service = container.resolve(UserService)
 assert isinstance(service.repo, PostgresUserRepository)
 ```
 
-### 三种作用域
+## 三种作用域
 
 ```python
 from autowire_di import Container, Scope
@@ -82,7 +134,15 @@ with container.new_scope() as scope2:
     assert s3 is not s1  # 不同作用域是不同实例
 ```
 
-### 四种注册方式
+### 作用域生命周期对比
+
+| 作用域 | 创建时机 | 实例数量 | 适用场景 |
+|---|---|---|---|
+| `TRANSIENT` | 每次 `resolve()` | 每次新建 | 无状态服务、轻量对象 |
+| `SINGLETON` | 首次 `resolve()` | 全局唯一 | 数据库连接池、配置对象 |
+| `SCOPED` | 首次在作用域内 `resolve()` | 每个作用域一个 | 请求级别的数据库会话、事务 |
+
+## 四种注册方式
 
 ```python
 container = Container()
@@ -102,7 +162,7 @@ container.register(ICache, RedisCache)
 # 当解析 CacheService 时，实际解析 ICache
 ```
 
-### 命名绑定
+## 命名绑定
 
 同一接口注册多个实现，通过名称区分：
 
@@ -128,7 +188,7 @@ class OrderService:
         self.fallback = fallback
 ```
 
-### 配置注入
+## 配置注入
 
 通过 `Inject` 标记从配置字典中注入值，支持点号路径：
 
@@ -156,7 +216,7 @@ assert conn.host == "localhost"
 assert conn.port == 5432
 ```
 
-### 多重绑定
+## 多重绑定
 
 同一接口注册多个实现，一次性全部解析：
 
@@ -167,7 +227,8 @@ container.register_multi(EventHandler, MetricsHandler)
 container.register_multi(EventHandler, AlertHandler)
 
 # 解析为列表
-handlers = container.resolve_multi(EventHandler)  # [LoggingHandler, MetricsHandler, AlertHandler]
+handlers = container.resolve_multi(EventHandler)
+# -> [LoggingHandler(), MetricsHandler(), AlertHandler()]
 
 # 也可以通过 list[T] 类型注解自动注入
 class EventBus:
@@ -175,7 +236,7 @@ class EventBus:
         self.handlers = handlers
 ```
 
-### Map 绑定
+## Map 绑定
 
 将同一接口的多个实现关联到字符串键，解析为 `dict[str, T]`：
 
@@ -186,7 +247,8 @@ container.register_map(ICache, "memory", MemoryCache)
 container.register_map(ICache, "disk", DiskCache)
 
 # 解析为字典
-caches = container.resolve_map(ICache)  # {"redis": RedisCache(), "memory": MemoryCache(), ...}
+caches = container.resolve_map(ICache)
+# -> {"redis": RedisCache(), "memory": MemoryCache(), "disk": DiskCache()}
 
 # 也可以通过 dict[str, T] 类型注解自动注入
 class CacheManager:
@@ -194,7 +256,7 @@ class CacheManager:
         self.caches = caches
 ```
 
-### 模块系统
+## 模块系统
 
 将相关绑定组织为可复用的模块：
 
@@ -217,7 +279,7 @@ container.install(InfraModule())
 container.install(DomainModule())
 ```
 
-### 私有模块
+## 私有模块
 
 `PrivateModule` 的绑定默认对外不可见，只有通过 `expose()` 显式暴露的接口才能被父容器解析。适合封装内部实现细节：
 
@@ -238,16 +300,20 @@ container.resolve(PaymentService)  # OK
 container.resolve(StripeClient)    # ResolutionError — 内部实现不可见
 ```
 
-### 工厂函数与资源清理
+## 工厂函数与资源清理
 
 生成器工厂支持 teardown 逻辑——yield 之前的代码创建资源，yield 之后的代码在作用域结束时清理：
 
 ```python
+from typing import Generator
+from autowire_di import Container, Scope
+
 def create_db_session(pool: DatabasePool) -> Generator[DbSession, None, None]:
     session = pool.acquire()
     yield session
     session.close()  # 作用域结束时自动执行
 
+container = Container()
 container.register(DbSession, factory=create_db_session, scope=Scope.SCOPED)
 
 with container.new_scope() as scope:
@@ -259,6 +325,8 @@ with container.new_scope() as scope:
 异步生成器同样支持：
 
 ```python
+from typing import AsyncGenerator
+
 async def create_async_session(pool: AsyncPool) -> AsyncGenerator[AsyncSession, None]:
     session = await pool.acquire()
     yield session
@@ -270,7 +338,7 @@ async with container.new_async_scope() as scope:
     session = await scope.async_resolve(AsyncSession)
 ```
 
-### Assisted 注入
+## Assisted 注入
 
 当一个类的构造参数中，部分由容器注入、部分由调用方提供时，使用 `Assisted` 标记 + `create_factory` 生成工厂函数：
 
@@ -297,12 +365,12 @@ payment = make_payment(amount=100.0, currency="USD")
 # gateway 自动注入，amount 和 currency 由调用方传入
 ```
 
-### ProviderWrapper 懒注入
+## ProviderWrapper 懒注入
 
 当依赖创建开销较大，或需要在运行时按需获取多个实例时，使用 `ProviderWrapper[T]` 延迟解析：
 
 ```python
-from autowire_di import Container, ProviderWrapper
+from autowire_di import Container, ProviderWrapper, Scope
 
 class ReportGenerator:
     def __init__(self, db_provider: ProviderWrapper[DbSession]) -> None:
@@ -319,11 +387,12 @@ container.register(DbSession, PostgresSession, scope=Scope.SCOPED)
 # 这也解决了 Singleton 依赖 Scoped 的作用域不匹配问题
 ```
 
-### AOP 方法拦截
+## AOP 方法拦截
 
 通过 `bind_interceptor` 声明式地为解析出的实例添加横切关注点（日志、事务、缓存、鉴权等），无需修改业务代码：
 
 ```python
+from typing import Any
 from autowire_di import (
     Container, MethodInterceptor, MethodInvocation,
     annotated_with, any_method, aop_mark,
@@ -360,7 +429,7 @@ service.place_order("book")
 # ← place_order = ordered book
 ```
 
-内置 Matcher 支持组合：
+### 内置 Matcher
 
 | Matcher | 说明 |
 |---|---|
@@ -370,7 +439,51 @@ service.place_order("book")
 | `name_matches("get_*")` | 按名称 glob 模式匹配 |
 | `m1 & m2`、`m1 \| m2`、`~m` | 逻辑组合 |
 
-### 子容器
+## 异步支持
+
+autowire-di 原生支持异步解析和异步工厂函数：
+
+### 异步解析
+
+```python
+import asyncio
+from autowire_di import Container, Scope
+
+container = Container()
+container.register(AsyncService, scope=Scope.SINGLETON)
+
+# 使用 async_resolve 异步解析
+service = await container.async_resolve(AsyncService)
+```
+
+### 异步工厂
+
+```python
+from typing import AsyncGenerator
+
+async def create_async_pool() -> AsyncGenerator[AsyncPool, None]:
+    pool = await AsyncPool.create(dsn="postgresql://...")
+    yield pool
+    await pool.close()
+
+container.register(AsyncPool, factory=create_async_pool, scope=Scope.SINGLETON)
+
+# 必须使用异步作用域
+async with container.new_async_scope() as scope:
+    pool = await scope.async_resolve(AsyncPool)
+```
+
+### 异步 Eager 单例
+
+```python
+container = Container()
+container.register(AsyncPool, factory=create_async_pool, scope=Scope.SINGLETON, eager=True)
+
+# 异步初始化所有 eager 单例
+await container.async_initialize_singletons()
+```
+
+## 子容器
 
 创建子容器继承父容器的绑定，可独立覆盖：
 
@@ -385,7 +498,7 @@ parent.resolve(ICache)  # -> RedisCache
 child.resolve(ICache)   # -> MemoryCache
 ```
 
-### 启动时验证
+## 启动时验证
 
 在应用启动时一次性验证所有绑定，提前发现缺失依赖、循环依赖和作用域不匹配：
 
@@ -399,9 +512,10 @@ container.validate()  # 抛出 ValidationError，包含所有错误
 ```
 
 检测的问题类型：
-- **缺失绑定**：依赖的接口未注册
-- **循环依赖**：A -> B -> C -> A
-- **作用域不匹配**：长生命周期服务依赖短生命周期服务（如 Singleton 依赖 Scoped）
+
+- **缺失绑定** — 依赖的接口未注册
+- **循环依赖** — A → B → C → A
+- **作用域不匹配** — 长生命周期服务依赖短生命周期服务（如 Singleton 依赖 Scoped）
 
 ## 分布式计算集成
 
@@ -495,6 +609,94 @@ service = rebuilt.resolve(TorchPredictor)
 | `ScopeNotActiveError` | 在作用域外解析 SCOPED 服务 |
 | `ValidationError` | `validate()` 发现一个或多个错误 |
 | `ExceptionGroup` | `dispose()` 时多个 teardown 出错（Python 3.11+） |
+
+## API 参考
+
+### Container
+
+| 方法 | 说明 |
+|---|---|
+| `register(interface, impl, *, factory, instance, scope, name, eager)` | 注册绑定 |
+| `resolve(interface, *, name)` | 同步解析 |
+| `async_resolve(interface, *, name)` | 异步解析 |
+| `override(interface, impl, *, factory, instance, scope, name)` | 覆盖已有绑定 |
+| `register_multi(interface, impl, *, factory, instance, scope)` | 添加多重绑定 |
+| `resolve_multi(interface)` | 解析所有多重绑定为 `list` |
+| `register_map(interface, key, impl, *, factory, instance, scope)` | 添加 Map 绑定 |
+| `resolve_map(interface)` | 解析所有 Map 绑定为 `dict` |
+| `install(module)` | 安装 `Module` 或 `PrivateModule` |
+| `new_scope()` | 创建同步作用域（上下文管理器） |
+| `new_async_scope()` | 创建异步作用域（异步上下文管理器） |
+| `create_child(*, config)` | 创建子容器 |
+| `create_factory(cls)` | 生成 Assisted 注入工厂函数 |
+| `resolve_kwargs(cls)` | 解析构造参数为 `dict`（不实例化） |
+| `make_injectable(cls, **overrides)` | 生成可序列化的零参数子类 |
+| `set_config(config)` | 设置配置字典 |
+| `validate()` | 启动时验证所有绑定 |
+| `initialize_singletons()` | 同步初始化所有 eager 单例 |
+| `async_initialize_singletons()` | 异步初始化所有 eager 单例 |
+| `dispose()` | 同步清理资源 |
+| `async_dispose()` | 异步清理资源 |
+
+### Annotated 标记
+
+| 标记 | 用法 | 说明 |
+|---|---|---|
+| `Named(name)` | `Annotated[T, Named("x")]` | 按名称选择绑定 |
+| `Inject(config=key)` | `Annotated[T, Inject(config="a.b")]` | 注入配置值 |
+| `Assisted()` | `Annotated[T, Assisted()]` | 标记为调用方提供的参数 |
+
+### Scope 枚举
+
+| 值 | 说明 |
+|---|---|
+| `Scope.TRANSIENT` | 每次解析创建新实例（默认） |
+| `Scope.SINGLETON` | 全局唯一，线程安全 |
+| `Scope.SCOPED` | 作用域内共享，作用域间隔离 |
+
+### AOP
+
+| 类/函数 | 说明 |
+|---|---|
+| `MethodInterceptor` | 拦截器基类，实现 `invoke(invocation)` |
+| `MethodInvocation` | 方法调用上下文，调用 `proceed()` 继续链 |
+| `aop_mark(*markers)` | 装饰器，为类/方法附加 AOP 标记 |
+| `annotated_with(marker)` | Matcher：匹配带指定标记的目标 |
+| `any_class()` / `any_method()` | Matcher：匹配所有 |
+| `subclass_of(parent)` | Matcher：匹配子类 |
+| `name_matches(pattern)` | Matcher：按 glob 模式匹配名称 |
+
+### Provider 类型
+
+| 类 | 说明 |
+|---|---|
+| `ClassProvider` | 通过自动装配 `__init__` 创建实例 |
+| `FactoryProvider` | 调用工厂函数创建实例，支持生成器 teardown |
+| `ValueProvider` | 返回预设实例 |
+| `AliasProvider` | 委托到另一个已注册类型 |
+| `ProviderWrapper[T]` | 懒包装器，调用 `.get()` 时解析 |
+
+## 示例
+
+`examples/` 目录包含完整的可运行示例：
+
+| 文件 | 内容 |
+|---|---|
+| [`01_basic_autowiring.py`](examples/01_basic_autowiring.py) | 基本自动装配和 Protocol 接口 |
+| [`02_scopes.py`](examples/02_scopes.py) | 三种作用域的生命周期管理 |
+| [`03_config_injection.py`](examples/03_config_injection.py) | 配置注入和点号路径 |
+| [`04_modules.py`](examples/04_modules.py) | 模块系统和私有模块 |
+| [`05_aop_interceptors.py`](examples/05_aop_interceptors.py) | AOP 方法拦截和 Matcher 组合 |
+| [`06_async_support.py`](examples/06_async_support.py) | 异步解析和异步工厂 |
+| [`07_assisted_injection.py`](examples/07_assisted_injection.py) | Assisted 注入和工厂函数 |
+| [`08_advanced_features.py`](examples/08_advanced_features.py) | 多重绑定、Map 绑定、ProviderWrapper |
+| [`09_distributed_computing.py`](examples/09_distributed_computing.py) | 分布式计算集成（make_injectable、Recipe） |
+
+运行示例：
+
+```bash
+uv run python examples/01_basic_autowiring.py
+```
 
 ## 项目结构
 
